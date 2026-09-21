@@ -41,9 +41,10 @@ browser. It reads a few hundred KB per photo, shows "Reading N of M" as it goes 
   device (localStorage) until you clear it. Three ways to load it:
   * **Route GPX**: pick a GPX file from Files (a guidebook download, an export
     from a hiking app). Tracks and routes both work.
-  * **Alta Via 1 from OSM**: queries the OpenStreetMap Overpass API for hiking
-    relations named "Alta Via 1" in the Dolomites and draws all their ways. Takes
-    a few seconds; needs network; the button reports what it got.
+  * **Alta Via 1 from OSM**: fetches OpenStreetMap relation 177743, "Alta via
+    n. 1 delle Dolomiti - Dolomiten-Höhenweg Nr. 1", through the Overpass API
+    (with a name search in the Dolomites as fallback) and draws all its ways.
+    Takes a few seconds; needs network; the button reports what it got.
   * `&r=<name>` in the link loads `routes/<name>.gpx` from this site. See
     `routes/README.md` for how to upload one from the phone.
 * **Off route.** With a reference loaded, each photo more than 250 m from the
@@ -54,15 +55,18 @@ browser. It reads a few hundred KB per photo, shows "Reading N of M" as it goes 
   OpenTopoMap with contour lines, huts and marked trails. The choice is
   remembered on the device.
 * **Trails + elevation.** Photos are only where you stopped, so the plain
-  line between them cuts corners. This button sends each day's photo
-  positions, in order, to [BRouter](https://brouter.de) (a free
-  OpenStreetMap-based router, `hiking-mountain` profile, falling back to
-  `trekking`) and draws the trail it finds through them, with the altitude of
-  every vertex. Each day then shows its trail distance and **↑ ascent ↓
+  line between them cuts corners. As soon as the photos are on the map, the
+  page sends each day's positions, in order, to [BRouter](https://brouter.de)
+  (a free OpenStreetMap-based router, `hiking-mountain` profile, falling back
+  to `trekking`) and replaces the straight line with the trail it finds
+  through them, with the altitude of every vertex. A second status line under
+  the buttons reports "Routing day 3 of 9…" and, at the end, which days could
+  not be routed and why; the **Trails + elevation** button retries those. Each day then shows its trail distance and **↑ ascent ↓
   descent** (an 8 m hysteresis filters out elevation noise), and the stats line
   sums the ascent. Results are cached on the device per set of photo
-  positions, so it runs once. Up to 40 positions go in one request; longer
-  days are split and joined. A photo taken off any mapped path makes the
+  positions, so it runs once. Ten positions go in one request (the public
+  server allows 60 s per request and mountain legs are slow); longer days are
+  split and joined. A photo taken off any mapped path makes the
   router detour to the nearest trail and back, so the line between two photos
   is the router's guess along trails, not a GPS track. Days that could not be
   routed keep their straight line and are named in the message.

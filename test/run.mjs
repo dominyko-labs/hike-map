@@ -99,6 +99,7 @@ const errors = [];
 page.on('pageerror', e => errors.push(String(e)));
 page.on('console', m => { if (m.type() === 'error' && !/Failed to load resource|net::ERR/.test(m.text())) errors.push(m.text()); }); // the 404/504 fetches and blocked tiles are provoked on purpose
 const ready = () => page.waitForFunction(() => !!window.__hike);
+await page.route('**/brouter?*', r => r.fulfill({ status: 503, body: 'mock: routing off' }));   // sections 1-9: auto-routing fails fast
 const lines = cls => page.locator('path.' + cls).count();
 
 // ---- 1. multi-day link, deliberately out of time order ----
@@ -208,7 +209,7 @@ await page.goto(base + hash); await ready();
 await page.click('#btn-osm');
 await page.waitForFunction(() => document.getElementById('msg').textContent.includes('OpenStreetMap:'));
 check((await page.locator('#msg').innerText()).includes('"Alta Via 1" loaded from OpenStreetMap: 2 ways, 5 points'), 'relation name, way and point counts reported');
-check(sentQuery.includes('[out:json]') && sentQuery.includes('route"="hiking"') && sentQuery.includes('^Alta Via (n\\\\.? ?)?1$') && sentQuery.includes('>>;);out geom;'), `query shape: ${sentQuery}`);
+check(sentQuery.includes('[out:json]') && sentQuery.includes('(relation(177743);relation["route"="hiking"]["name"~"alta via.*(n\\\\.|nr\\\\.|n|nr)? ?1( |$|[^0-9])",i](') && sentQuery.includes('>>;);out geom;'), `query shape: ${sentQuery}`);
 check((await lines('ref-route')) === 2, '2 reference segments from the ways');
 check((await page.locator('#stats').innerText()).includes('4 off route'), 'off-route recomputed against the fetched route');
 await page.unroute('**/api/interpreter');
@@ -313,13 +314,16 @@ await page.route('**/brouter?*', async r => {
   // 8 coordinates spread from the first to the last waypoint, with the ELE profile
   const [lon0, lat0] = lonlats[0].split(',').map(Number), [lon1, lat1] = lonlats[lonlats.length - 1].split(',').map(Number);
   const coords = ELE.map((e, i) => [lon0 + (lon1 - lon0) * i / 7, lat0 + (lat1 - lat0) * i / 7, e]);
-  await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: { 'track-length': '1234' }, geometry: { type: 'LineString', coordinates: coords } }] }) });
+  // BRouter puts the track first and waypoint Points after it; the parser must pick the LineString
+  await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ type: 'FeatureCollection', features: [
+    { type: 'Feature', properties: { type: 'from' }, geometry: { type: 'Point', coordinates: [lon0, lat0] } },
+    { type: 'Feature', properties: { 'track-length': '1234' }, geometry: { type: 'LineString', coordinates: coords } }] }) });
 });
 await page.goto(base + hash); await ready();
-check(await page.locator('#btn-trails').isVisible() && (await page.locator('#btn-trails').innerText()) === 'Trails + elevation', 'trails button offered');
-await page.click('#btn-trails');
-await page.waitForFunction(() => document.getElementById('msg').textContent.includes('days on trails'));
-check((await page.locator('#msg').innerText()) === '2 of 2 days on trails with elevation.', `message: ${await page.locator('#msg').innerText()}`);
+check(await page.locator('#btn-trails').isVisible(), 'trails button offered');
+await page.waitForFunction(() => document.getElementById('msg2').textContent.includes('days on trails'));   // no click: routing starts by itself
+check((await page.locator('#msg2').innerText()) === '2 of 2 days on trails with elevation.', `message: ${await page.locator('#msg2').innerText()}`);
+check((await page.locator('#msg').innerText()) === '', 'routing status does not overwrite the main message');
 check(brReqs.map(r => r.profile).join(',') === 'hiking-mountain,trekking,hiking-mountain', `profile fallback then normal: ${brReqs.map(r => r.profile).join(',')}`);
 check((await lines('routed')) === 2 && (await lines('straight')) === 1, `2 routed lines, 1 straight (single-photo day)`);
 const tdays = await page.evaluate(() => window.__hike.days());
@@ -335,26 +339,31 @@ const before = brReqs.length;
 await page.reload(); await ready();
 await page.waitForSelector('path.routed', { state: 'attached' });
 check((await lines('routed')) === 2 && brReqs.length === before, 'routed lines restored from cache on reload, no new requests');
-// chunking: one day with 45 waypoints spaced ~111 m -> 2 requests of 40 and 6, joined into 15 vertices
+// chunking: one day with 45 waypoints spaced ~111 m -> requests of 10,10,10,10,9 (sharing a point), joined into 36 vertices
 const wps45 = Array.from({ length: 45 }, (_, i) => `${(46.7 + i * 0.001).toFixed(4)},12.5,2026-09-25T${String(8 + Math.floor(i / 6)).padStart(2, '0')}:${String((i % 6) * 10).padStart(2, '0')}:00`);
-await page.goto(base + '#p=' + wps45.join(';')); await ready();
 brReqs.length = 0; failMode = 'none';
-await page.click('#btn-trails');
-await page.waitForFunction(() => document.getElementById('msg').textContent.includes('days on trails'));
-check(brReqs.length === 2 && brReqs[0].n === 40 && brReqs[1].n === 6, `45 waypoints sent as 40 + 6 (got ${brReqs.map(r => r.n).join('+')})`);
+await page.goto(base + '#p=' + wps45.join(';')); await ready();
+await page.waitForFunction(() => document.getElementById('msg2').textContent.includes('days on trails'));
+check(brReqs.map(r => r.n).join('+') === '10+10+10+10+9', `45 waypoints sent as 10+10+10+10+9 (got ${brReqs.map(r => r.n).join('+')})`);
 const t45 = await page.evaluate(() => window.__hike.days()[0].trail);
-// the mock restarts its profile at 1000 m in the second chunk, so the joined profile is
-// 1000..1030 then 1005..1030: up 50+15+30, down 20+25+20
-check(t45 && t45.n === 15 && t45.up === 95 && t45.down === 65, `chunks joined: ${t45 && t45.n} vertices, up ${t45 && t45.up}, down ${t45 && t45.down}`);
+// the mock restarts its profile at 1000 m in every chunk, so after the first (up 50, down 20) each
+// further chunk starts from base 1030: 1005 (down 25), 1020 (up 15), 1050 (up 30), 1030 (down 20)
+check(t45 && t45.n === 36 && t45.up === 50 + 4 * 45 && t45.down === 20 + 4 * 45, `chunks joined: ${t45 && t45.n} vertices, up ${t45 && t45.up}, down ${t45 && t45.down}`);
 // total failure: straight line stays, message says which day
-await page.goto(base + '#p=46.8,12.6,2026-09-26T08:00:00;46.81,12.61,2026-09-26T09:00:00'); await ready();
 failMode = 'all'; brReqs.length = 0;
-await page.click('#btn-trails');
-await page.waitForFunction(() => document.getElementById('msg').textContent.includes('days on trails'));
-const fm = await page.locator('#msg').innerText();
+await page.goto(base + '#p=46.8,12.6,2026-09-26T08:00:00;46.81,12.61,2026-09-26T09:00:00'); await ready();   // hash-only change: no reload, the status line must reset
+await page.waitForFunction(() => document.getElementById('msg2').textContent.includes('0 of 1 days on trails'));
+const fm = await page.locator('#msg2').innerText();
 check(fm.startsWith('0 of 1 days on trails') && fm.includes('Not routed: day 1 (trekking: 500'), `failure reported: ${fm}`);
-check((await lines('straight')) === 1 && (await lines('routed')) === 0 && brReqs.length === 2, 'straight line kept, both profiles tried');
+check((await lines('straight')) === 1 && (await lines('routed')) === 0 && brReqs.length === 2, `straight line kept, both profiles tried (requests: ${JSON.stringify(brReqs)}, straight ${await lines('straight')}, routed ${await lines('routed')})`);
 check(await page.locator('#btn-trails').isEnabled(), 'button re-enabled after failure');
+// the button retries; a network-level failure is named as such
+await page.unroute('**/brouter?*');
+await page.route('**/brouter?*', r => r.abort('failed'));
+await page.click('#btn-trails');
+await page.waitForFunction(() => /days on trails/.test(document.getElementById('msg2').textContent) && document.getElementById('btn-trails').disabled === false);
+const nm = await page.locator('#msg2').innerText();
+check(nm.includes('network error'), `network failure named: ${nm}`);
 await page.unroute('**/brouter?*');
 
 // ---- 9. tiles toggle and layout ----

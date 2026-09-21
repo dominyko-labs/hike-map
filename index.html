@@ -58,7 +58,8 @@
   #empty { color: var(--muted); font-size: 14px; }
   #empty p { margin: 6px 0; }
   #msg { color: var(--muted); font-size: 14px; margin: 8px 0 0; min-height: 1.2em; }
-  #msg.err { color: var(--danger); }
+  #msg.err, #msg2.err { color: var(--danger); }
+  #msg2 { color: var(--muted); font-size: 14px; margin: 4px 0 0; min-height: 0; }
   .hidden { display: none !important; }
   .leaflet-container { font: inherit; }
   .leaflet-popup-content { margin: 10px 12px; font-size: 14px; }
@@ -95,6 +96,7 @@
     <button id="btn-tiles" type="button">Topo tiles</button>
   </div>
   <p id="msg" role="status" aria-live="polite"></p>
+  <p id="msg2" role="status" aria-live="polite"></p>
 </section>
 
 <script src="vendor/leaflet/leaflet.js"></script>
@@ -104,6 +106,7 @@
 
   var OFF_ROUTE_M = 250;                      // a photo further than this from the reference counts as "off route"
   var OVERPASS = 'https://overpass-api.de/api/interpreter';
+  var AV1_RELATION = 177743;                  // "Alta via n. 1 delle Dolomiti - Dolomiten-Höhenweg Nr. 1" on openstreetmap.org
   var AV1_BBOX = '46.0,11.7,46.9,12.4';       // south,west,north,east: the Dolomites between Braies and Belluno
   var DOLOMITES = [46.45, 12.05];
   var DAY_COLORS = ['#2a9d8f', '#e76f51', '#8e7cc3', '#d64f8a', '#3d8fd1', '#c9a227', '#26a69a', '#a0522d', '#5c6bc0', '#7cb342'];
@@ -111,7 +114,8 @@
   var TRAILS_KEY = 'hike-map.trails.v1';
   var BROUTER = 'https://brouter.de/brouter';
   var PROFILES = ['hiking-mountain', 'trekking'];     // tried in order
-  var WP_MIN_M = 40, WP_PER_REQUEST = 40, ELE_HYST_M = 8;
+  var WP_MIN_M = 40, WP_PER_REQUEST = 10, ELE_HYST_M = 8, FETCH_TIMEOUT_MS = 75000;
+  var autoRoutedFor = '';
 
   // ---------- state ----------
   var points = [];      // {lat, lon, t}
@@ -509,6 +513,7 @@
   function $(id) { return document.getElementById(id); }
   function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
   function setMsg(s, isErr) { $('msg').textContent = s || ''; $('msg').classList.toggle('err', !!isErr); }
+  function setMsg2(s, isErr) { $('msg2').textContent = s || ''; $('msg2').classList.toggle('err', !!isErr); }
 
   function initMap() {
     map = L.map('map', { zoomControl: true });
@@ -656,8 +661,9 @@
     }).catch(function (e) { setMsg('Route not loaded: ' + e.message, true); });
   }
   function fetchAv1() {
+    // The relation by id first; by name as a fallback in case it is ever renumbered.
     var q = '[out:json][timeout:90];' +
-      '(relation["route"="hiking"]["name"~"^Alta Via (n\\\\.? ?)?1$",i](' + AV1_BBOX + ');>>;);out geom;';
+      '(relation(' + AV1_RELATION + ');relation["route"="hiking"]["name"~"alta via.*(n\\\\.|nr\\\\.|n|nr)? ?1( |$|[^0-9])",i](' + AV1_BBOX + ');>>;);out geom;';
     setMsg('Fetching Alta Via 1 from OpenStreetMap…');
     $('btn-osm').disabled = true;
     fetch(OVERPASS, { method: 'POST', body: 'data=' + encodeURIComponent(q),
@@ -684,8 +690,8 @@
   }
   // GeoJSON from BRouter -> [[lat, lon, ele], ...]
   function parseBrouter(json) {
-    var f = json && json.features && json.features[0];
-    var c = f && f.geometry && f.geometry.coordinates;
+    var f = json && json.features && json.features.filter(function (x) { return x.geometry && x.geometry.type === 'LineString'; })[0];
+    var c = f && f.geometry.coordinates;
     if (!c || c.length < 2) throw new Error('no geometry in the routing answer');
     return c.map(function (x) { return [x[1], x[0], typeof x[2] === 'number' ? x[2] : NaN]; });
   }
@@ -694,10 +700,18 @@
     var next = function (lastErr) {
       if (i >= PROFILES.length) throw lastErr || new Error('routing failed');
       var profile = PROFILES[i++];
-      return fetch(brouterUrl(wps, profile)).then(function (res) {
+      var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+      var timer = ctl ? setTimeout(function () { ctl.abort(); }, FETCH_TIMEOUT_MS) : null;
+      return fetch(brouterUrl(wps, profile), ctl ? { signal: ctl.signal } : {}).then(function (res) {
+        clearTimeout(timer);
         if (!res.ok) return res.text().then(function (t) { throw new Error(profile + ': ' + res.status + ' ' + t.slice(0, 120)); });
         return res.json();
-      }).then(parseBrouter).catch(function (e) { return next(e); });
+      }).then(parseBrouter).catch(function (e) {
+        clearTimeout(timer);
+        if (e && e.name === 'AbortError') e = new Error(profile + ': no answer within ' + Math.round(FETCH_TIMEOUT_MS / 1000) + ' s');
+        else if (e && e.name === 'TypeError') e = new Error(profile + ': network error (' + e.message + ')');
+        return next(e);
+      });
     };
     return next(null);
   }
@@ -723,7 +737,7 @@
     var done = 0, failed = [];
     todo.reduce(function (chain, g) {
       return chain.then(function () {
-        setMsg('Routing day ' + (dayGroups.indexOf(g) + 1) + ' of ' + dayGroups.length + ' along trails…');
+        setMsg2('Routing day ' + (dayGroups.indexOf(g) + 1) + ' of ' + dayGroups.length + ' along trails…');
         return routeDay(g).then(function (t) {
           if (t) { trails[wpHash(g.wps)] = t; saveTrails(); done++; render(); }
         }).catch(function (e) { failed.push('day ' + (dayGroups.indexOf(g) + 1) + ' (' + e.message + ')'); });
@@ -734,16 +748,25 @@
       render();
       var n = dayGroups.filter(function (g) { return g.trail; }).length;
       var routable = dayGroups.filter(function (g) { return g.wps.length >= 2; }).length;
-      setMsg(n + ' of ' + routable + ' days on trails with elevation' +
+      setMsg2(n + ' of ' + routable + ' days on trails with elevation' +
         (failed.length ? '. Not routed: ' + failed.join('; ') : '') + '.', failed.length > 0);
     });
+  }
+  // Routing starts by itself once per set of points; the button retries after a failure.
+  function scheduleAutoRoute() {
+    var key = dayGroups.map(function (g) { return wpHash(g.wps); }).join('/');
+    if (!key || key === autoRoutedFor) return;
+    var pending = dayGroups.some(function (g) { return !g.trail && g.wps.length >= 2; });
+    if (!pending) return;
+    autoRoutedFor = key;
+    setTimeout(routeAllDays, 600);
   }
 
   // ---------- photo input ----------
   function loadFromHash() {
     var params = parseHash(location.hash);
     points = []; skipped = 0; name = '';
-    setMsg('');
+    setMsg(''); setMsg2('');
     if (params) {
       var r = parsePointList(params.p || '');
       points = r.points;
@@ -754,6 +777,7 @@
       if (params.r) loadRouteUrl(params.r);
     }
     render();
+    scheduleAutoRoute();
   }
   function download(text, filename, type) {
     var a = document.createElement('a');
@@ -781,6 +805,7 @@
       setMsg(added + ' added' + (none ? ', ' + none + ' without GPS (pick from Files with Location kept on, not from the Photo Library, which strips it)' : '') + '.');
       if (points.length) history.replaceState(null, '', shareLink());
       $('files').disabled = false;
+      scheduleAutoRoute();
     });
   }
 
