@@ -61,6 +61,7 @@
   #days .d { flex: 1 1 auto; }
   #days .m { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
   #days .m small { display: block; font-size: 12px; }
+  #days .tag { font-size: 11px; color: var(--accent); border: 1px solid var(--accent); border-radius: 6px; padding: 0 5px; margin-left: 6px; vertical-align: 1px; }
   #empty { color: var(--muted); font-size: 14px; }
   #empty p { margin: 6px 0; }
   #msg { color: var(--muted); font-size: 14px; margin: 8px 0 0; min-height: 1.2em; }
@@ -94,6 +95,7 @@
   <ul id="days" class="hidden"></ul>
   <div id="empty">
     <p>In Photos select the trip, Share, Options, turn <b>Location</b> on, Save to Files. Then <b>Pick photos</b> below and choose them from Files (Browse, not Photo Library). One colour per day.</p>
+    <p>Have Strava or AllTrails recordings? <b>Recorded GPX</b> uses the real track for those days.</p>
     <p>Add the official route (a GPX file, or fetch Alta Via 1 from OpenStreetMap) to see where you took your own way.</p>
   </div>
   <div class="row">
@@ -103,6 +105,8 @@
     <label class="btn">Pick photos<input id="files" type="file" accept="image/*,.heic,.heif,.jpg,.jpeg" multiple></label>
   </div>
   <div class="row">
+    <label class="btn">Recorded GPX<input id="rec-file" type="file" accept=".gpx,application/gpx+xml,application/xml,text/xml" multiple></label>
+    <button id="btn-clear-rec" class="hidden" type="button">Clear recordings</button>
     <label class="btn">Route GPX<input id="route-file" type="file" accept=".gpx,application/gpx+xml,application/xml,text/xml"></label>
     <button id="btn-osm" type="button">Alta Via 1 from OSM</button>
     <button id="btn-route-gpx" class="hidden" type="button">Save route GPX</button>
@@ -127,6 +131,8 @@
   var DAY_COLORS = ['#2a9d8f', '#e76f51', '#8e7cc3', '#d64f8a', '#3d8fd1', '#c9a227', '#26a69a', '#a0522d', '#5c6bc0', '#7cb342'];
   var STORE_KEY = 'hike-map.route.v1';
   var TRAILS_KEY = 'hike-map.trails.v1';
+  var REC_KEY = 'hike-map.recorded.v1';
+  var REC_MIN_M = 5, REC_MAX_GAP_MS = 60000, REC_MAX_PTS = 4000;
   var BROUTER = 'https://brouter.de/brouter';
   var PROFILES = ['hiking-mountain', 'trekking'];     // tried in order
   var WP_MIN_M = 40, WP_PER_REQUEST = 10, ELE_HYST_M = 8, FETCH_TIMEOUT_MS = 75000;
@@ -140,6 +146,7 @@
   var map, layer, refLayer, osmTiles, topoTiles, useTopo = false;
   var dayGroups = [];
   var trails = {};      // waypoint-hash -> {coords: [[lat, lon, ele], ...], km, up, down}
+  var recorded = {};    // day key -> {coords: [[lat, lon, ele, t], ...], km, up, down, name}
   var routing = false;
   var progressLayer, dayLines = [], markerRefs = [], tlDays = [], tlTotal = 0, playing = false, playHandle = null;
   var TL_MAX = 10000, DAY_PLAY_MS = 5000, MIN_DAY_MS = 60000;
@@ -198,12 +205,15 @@
     var doc = new DOMParser().parseFromString(text, 'application/xml');
     if (doc.getElementsByTagName('parsererror').length) throw new Error('not valid XML');
     var segs = [];
+    var child = function (el, tag) { for (var c = el.firstElementChild; c; c = c.nextElementSibling) if (c.localName === tag) return c.textContent.trim(); return ''; };
     var take = function (parent, tag) {
       var pts = [];
       var els = parent.getElementsByTagName(tag);
       for (var i = 0; i < els.length; i++) {
         var lat = parseFloat(els[i].getAttribute('lat')), lon = parseFloat(els[i].getAttribute('lon'));
-        if (isFinite(lat) && isFinite(lon)) pts.push({ lat: lat, lon: lon });
+        if (!isFinite(lat) || !isFinite(lon)) continue;
+        var ele = parseFloat(child(els[i], 'ele')), tm = Date.parse(child(els[i], 'time'));
+        pts.push({ lat: lat, lon: lon, ele: isFinite(ele) ? ele : NaN, t: isFinite(tm) ? tm : NaN });
       }
       if (pts.length > 1) segs.push(pts);
     };
@@ -311,13 +321,21 @@
       if (!(k in idx)) { idx[k] = groups.length; groups.push({ key: k, pts: [] }); }
       groups[idx[k]].pts.push(p);
     });
+    Object.keys(recorded).forEach(function (k) {       // a recorded day without photos still counts
+      if (!(k in idx)) { idx[k] = groups.length; groups.push({ key: k, pts: [] }); }
+    });
+    groups.sort(function (a, b) { return a.key === 'undated' ? 1 : b.key === 'undated' ? -1 : a.key < b.key ? -1 : a.key > b.key ? 1 : 0; });
     groups.forEach(function (g, i) {
       g.color = DAY_COLORS[i % DAY_COLORS.length];
       g.wps = dayWaypoints(g.pts);
-      g.trail = trails[wpHash(g.wps)] || null;
+      var rec = recorded[g.key];
+      g.trail = rec ? { coords: rec.coords.map(function (c) { return [c[0], c[1], c[2]]; }), times: rec.coords.map(function (c) { return c[3]; }),
+                       km: rec.km, up: rec.up, down: rec.down, recorded: true }
+                    : (trails[wpHash(g.wps)] || null);
       g.km = g.trail ? g.trail.km : totalKm(g.pts);
       var timed = g.pts.filter(function (p) { return !isNaN(p.t); });
-      g.dur = timed.length >= 2 ? timed[timed.length - 1].t - timed[0].t : NaN;
+      g.dur = g.trail && g.trail.times ? g.trail.times[g.trail.times.length - 1] - g.trail.times[0]
+            : timed.length >= 2 ? timed[timed.length - 1].t - timed[0].t : NaN;
     });
     return groups;
   }
@@ -357,10 +375,12 @@
       });
     });
     groups.forEach(function (g, i) {
-      lines.push('  <trk><name>' + n + ' day ' + (i + 1) + (g.key === 'undated' ? '' : ' (' + g.key + ')') + (g.trail ? ', on trails' : '') + '</name><trkseg>');
+      lines.push('  <trk><name>' + n + ' day ' + (i + 1) + (g.key === 'undated' ? '' : ' (' + g.key + ')') + (g.trail ? (g.trail.recorded ? ', recorded' : ', on trails') : '') + '</name><trkseg>');
       if (g.trail) {
-        g.trail.coords.forEach(function (c) {
-          lines.push('    <trkpt lat="' + c[0] + '" lon="' + c[1] + '">' + (isFinite(c[2]) ? '<ele>' + c[2] + '</ele>' : '') + '</trkpt>');
+        g.trail.coords.forEach(function (c, ci) {
+          var tt = g.trail.times ? g.trail.times[ci] : NaN;
+          lines.push('    <trkpt lat="' + c[0] + '" lon="' + c[1] + '">' + (isFinite(c[2]) ? '<ele>' + c[2] + '</ele>' : '') +
+            (isFinite(tt) ? '<time>' + isoUTC(tt) + '</time>' : '') + '</trkpt>');
         });
       } else {
         g.pts.forEach(function (p) {
@@ -440,7 +460,10 @@
       var x = readIfd(u32(ifd0[0x8769].at));
       var dt = x[0x9003] ? ascii(x[0x9003]) : (x[0x9004] ? ascii(x[0x9004]) : '');
       var m = /^(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)/.exec(dt);
-      if (m) res.t = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
+      var off = x[0x9011] ? ascii(x[0x9011]) : (x[0x9012] ? ascii(x[0x9012]) : '');
+      var om = /^([+-])(\d\d):(\d\d)$/.exec(off);
+      if (m && om) res.t = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) - (om[1] === '-' ? -1 : 1) * (+om[2] * 60 + +om[3]) * 60000;
+      else if (m) res.t = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
     }
     return isFinite(res.lat) && isFinite(res.lon) ? res : null;
   }
@@ -577,7 +600,7 @@
 
   function render() {
     layer.clearLayers();
-    var has = points.length > 0;
+    var has = points.length > 0 || Object.keys(recorded).length > 0;
     $('stats').classList.toggle('hidden', !has);
     $('days').classList.toggle('hidden', !has);
     $('empty').classList.toggle('hidden', has);
@@ -601,7 +624,7 @@
       if (g.trail) {
         anyTrail = true; upTotal += g.trail.up;
         line = L.polyline(g.trail.coords.map(function (c) { return [c[0], c[1]]; }),
-          { color: g.color, weight: 4, opacity: .9, className: 'day-line routed' }).addTo(layer);
+          { color: g.color, weight: 4, opacity: .9, className: 'day-line ' + (g.trail.recorded ? 'recorded' : 'routed') }).addTo(layer);
       } else {
         line = L.polyline(g.pts.map(function (p) { return [p.lat, p.lon]; }),
           { color: g.color, weight: 4, opacity: .9, className: 'day-line straight' }).addTo(layer);
@@ -623,7 +646,10 @@
           '<br><small>' + p.lat.toFixed(5) + ', ' + p.lon.toFixed(5) + '</small>').addTo(layer);
       });
     });
-    map.fitBounds(L.latLngBounds(sorted.map(function (p) { return [p.lat, p.lon]; })).pad(0.15), { maxZoom: 16 });
+    var boundsPts = sorted.map(function (p) { return [p.lat, p.lon]; });
+    dayGroups.forEach(function (g) { if (g.trail && !g.pts.length) g.trail.coords.forEach(function (c) { boundsPts.push([c[0], c[1]]); }); });
+    map.fitBounds(L.latLngBounds(boundsPts).pad(0.15), { maxZoom: 16 });
+    $('btn-clear-rec').classList.toggle('hidden', !Object.keys(recorded).length);
 
     $('s-count').textContent = sorted.length;
     $('s-days').textContent = dayGroups.length;
@@ -643,11 +669,12 @@
     dayGroups.forEach(function (g, i) {
       var li = document.createElement('li');
       li.innerHTML = '<span class="sw" style="background:' + g.color + '"></span>' +
-        '<span class="d">Day ' + (i + 1) + ' · ' + esc(fmtDay(g.key)) + '</span>' +
+        '<span class="d">Day ' + (i + 1) + ' · ' + esc(fmtDay(g.key)) + (g.trail && g.trail.recorded ? '<span class="tag">GPS</span>' : '') + '</span>' +
         '<span class="m">' + g.pts.length + ' · ' + g.km.toFixed(1) + ' km · ' + fmtDuration(g.dur) +
         (g.trail ? '<small>↑ ' + g.trail.up + ' m ↓ ' + g.trail.down + ' m</small>' : '') + '</span>';
       li.addEventListener('click', function () {
-        map.fitBounds(L.latLngBounds(g.pts.map(function (p) { return [p.lat, p.lon]; })).pad(0.2), { maxZoom: 15 });
+        var b = g.trail ? g.trail.coords.map(function (c) { return [c[0], c[1]]; }) : g.pts.map(function (p) { return [p.lat, p.lon]; });
+        map.fitBounds(L.latLngBounds(b).pad(0.2), { maxZoom: 15 });
       });
       ul.appendChild(li);
     });
@@ -749,13 +776,89 @@
     return lines.join('\n');
   }
 
+  // ---------- recorded tracks (Strava, AllTrails, a watch): the real walk for a day ----------
+  function restoreRecorded() {
+    try { var s = localStorage.getItem(REC_KEY); if (s) recorded = JSON.parse(s) || {}; } catch (e) { recorded = {}; }
+  }
+  function saveRecorded() {
+    try { localStorage.setItem(REC_KEY, JSON.stringify(recorded)); return true; } catch (e) { return false; }
+  }
+  // Thin a point list: keep a point when it is REC_MIN_M from the last kept one or REC_MAX_GAP_MS later,
+  // then cap the count so a day fits in localStorage.
+  function thinTrack(pts) {
+    var out = [];
+    pts.forEach(function (p, i) {
+      var last = out[out.length - 1];
+      if (!last || i === pts.length - 1 || haversineKm(last, p) * 1000 >= REC_MIN_M || p.t - last.t >= REC_MAX_GAP_MS) out.push(p);
+    });
+    if (out.length > REC_MAX_PTS) {
+      var stride = Math.ceil(out.length / REC_MAX_PTS), thinned = [];
+      out.forEach(function (p, i) { if (i % stride === 0 || i === out.length - 1) thinned.push(p); });
+      out = thinned;
+    }
+    return out;
+  }
+  // A parsed GPX with timestamps -> one recording per calendar day. Returns the day keys it filled.
+  function ingestRecorded(parsed, fileName) {
+    var all = [];
+    parsed.segs.forEach(function (seg) { seg.forEach(function (p) { if (!isNaN(p.t)) all.push(p); }); });
+    all.sort(function (a, b) { return a.t - b.t; });
+    var byDay = {};
+    all.forEach(function (p) { var k = dayKey(p.t); (byDay[k] = byDay[k] || []).push(p); });
+    var keys = Object.keys(byDay).sort();
+    keys.forEach(function (k) {
+      var pts = thinTrack(byDay[k]);
+      var coords = pts.map(function (p) { return [p.lat, p.lon, p.ele, p.t]; });
+      var gain = elevationGain(coords);
+      recorded[k] = { coords: coords, km: coordsKm(coords), up: gain.up, down: gain.down, name: fileName || parsed.name };
+    });
+    return keys;
+  }
+  function loadRecordedFiles(files) {
+    var summary = [], asRoute = null, done = 0;
+    files.forEach(function (f) {
+      var rd = new FileReader();
+      rd.onload = function () {
+        try {
+          var parsed = parseGpx(rd.result);
+          var timed = parsed.segs.some(function (seg) { return seg.some(function (p) { return !isNaN(p.t); }); });
+          if (timed) {
+            var keys = ingestRecorded(parsed, f.name);
+            summary.push(f.name + ': ' + keys.map(function (k) { return fmtDay(k) + ' ' + recorded[k].km.toFixed(1) + ' km'; }).join(', '));
+          } else {
+            asRoute = parsed; summary.push(f.name + ': no timestamps, loaded as the reference route');
+          }
+        } catch (e) { summary.push(f.name + ': ' + e.message); }
+        finish();
+      };
+      rd.onerror = function () { summary.push(f.name + ': could not be read'); finish(); };
+      rd.readAsText(f);
+    });
+    function finish() {
+      if (++done < files.length) return;
+      var stored = saveRecorded();
+      if (asRoute) setRoute(asRoute, true);
+      render();
+      setMsg(summary.join('. ') + (stored ? '' : '. Too large to keep on the device: reload will forget it') + '.', !stored);
+      scheduleAutoRoute();
+    }
+  }
+  function clearRecorded() {
+    recorded = {}; saveRecorded(); render(); setMsg('Recordings cleared.');
+  }
+
   // ---------- timeline: where you were at any moment of the walk ----------
   // Per day, a path of {lat, lon, ele, d (km so far), t (ms)}: the routed trail with photo times pinned to
   // their nearest vertices and interpolated by distance in between, or the photo points themselves.
   function buildPath(g) {
+    var path, i;
+    if (g.trail && g.trail.times && g.trail.coords.length > 1) {
+      path = g.trail.coords.map(function (c, ci) { return { lat: c[0], lon: c[1], ele: c[2], d: 0, t: g.trail.times[ci] }; });
+      for (i = 1; i < path.length; i++) path[i].d = path[i - 1].d + haversineKm(path[i - 1], path[i]);
+      return path;
+    }
     var pts = g.pts.filter(function (p) { return !isNaN(p.t); });
     if (!pts.length) return [];
-    var path, i;
     if (g.trail && g.trail.coords.length > 1) {
       path = g.trail.coords.map(function (c) { return { lat: c[0], lon: c[1], ele: c[2], d: 0, t: NaN }; });
       for (i = 1; i < path.length; i++) path[i].d = path[i - 1].d + haversineKm(path[i - 1], path[i]);
@@ -994,6 +1097,7 @@
   initMap();
   restoreRoute();
   restoreTrails();
+  restoreRecorded();
   renderRoute();
   loadFromHash();
   window.addEventListener('hashchange', loadFromHash);
@@ -1007,6 +1111,8 @@
   });
   $('files').addEventListener('change', function (e) { onFiles(e.target.files); e.target.value = ''; });
   $('route-file').addEventListener('change', function (e) { if (e.target.files[0]) loadRouteFile(e.target.files[0]); e.target.value = ''; });
+  $('rec-file').addEventListener('change', function (e) { var fs = Array.prototype.slice.call(e.target.files); if (fs.length) loadRecordedFiles(fs); e.target.value = ''; });
+  $('btn-clear-rec').addEventListener('click', clearRecorded);
   $('btn-osm').addEventListener('click', fetchAv1);
   $('btn-route-gpx').addEventListener('click', function () {
     if (route) download(routeGpx(), (route.name || 'route').replace(/[^\w.-]+/g, '_') + '.gpx', 'application/gpx+xml');
@@ -1020,7 +1126,8 @@
   // Exposed for the test-suite only.
   window.__hike = {
     points: function () { return sortByTime(points); },
-    days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, color: g.color, wps: g.wps.length, trail: g.trail ? { n: g.trail.coords.length, km: g.trail.km, up: g.trail.up, down: g.trail.down } : null }; }); },
+    days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, dur: g.dur, color: g.color, wps: g.wps.length, trail: g.trail ? { n: g.trail.coords.length, km: g.trail.km, up: g.trail.up, down: g.trail.down, recorded: !!g.trail.recorded } : null }; }); },
+    thinTrack: thinTrack,
     elevationGain: elevationGain, dayWaypoints: dayWaypoints,
     timelineAt: function (v) { var p = timelineAt(v); return p && { day: p.day.gi, t: p.t, lat: p.lat, lon: p.lon, ele: p.ele, km: p.km }; },
     timelineTotal: function () { return tlTotal; },

@@ -23,30 +23,48 @@ const hv = (a, b) => { const dLat = (b[0] - a[0]) * toRad, dLon = (b[1] - a[1]) 
 const pathKm = pts => { let d = 0; for (let i = 1; i < pts.length; i++) d += hv(pts[i - 1], pts[i]); return d; };
 
 // ---- fixture: a minimal JPEG whose APP1 carries GPS + DateTimeOriginal (little-endian TIFF) ----
-function tiffWithGps({ lat, lon, date }) {
+function tiffWithGps({ lat, lon, date, offset }) {
   const latRef = lat < 0 ? 'S' : 'N', lonRef = lon < 0 ? 'W' : 'E';
   const dms = v => { v = Math.abs(v); const d = Math.floor(v), m = Math.floor((v - d) * 60), s = Math.round(((v - d) * 60 - m) * 60 * 1000); return [[d, 1], [m, 1], [s, 1000]]; };
   const tiff = [];
   const u16 = n => tiff.push(n & 255, (n >> 8) & 255);
   const u32 = n => tiff.push(n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >>> 24) & 255);
+  // layout: header 8 | IFD0 @8 (2 entries: 30 bytes) | Exif IFD @38 (1 or 2 entries) | date 20 | [offset 8] | GPS IFD (4 entries: 54) | lat 24 | lon 24
+  const nExif = offset ? 2 : 1, exifAt = 38, dateAt = exifAt + 2 + 12 * nExif + 4, offAt = dateAt + 20;
+  const gpsAt = offAt + (offset ? 8 : 0), latAt = gpsAt + 54, lonAt = latAt + 24;
   tiff.push(0x49, 0x49); u16(42); u32(8);
   u16(2);
-  u16(0x8769); u16(4); u32(1); u32(38);
-  u16(0x8825); u16(4); u32(1); u32(76);
+  u16(0x8769); u16(4); u32(1); u32(exifAt);
+  u16(0x8825); u16(4); u32(1); u32(gpsAt);
   u32(0);
-  u16(1);
-  u16(0x9003); u16(2); u32(20); u32(56);
+  u16(nExif);
+  u16(0x9003); u16(2); u32(20); u32(dateAt);
+  if (offset) { u16(0x9011); u16(2); u32(7); u32(offAt); }
   u32(0);
   for (const c of date.padEnd(19, ' ')) tiff.push(c.charCodeAt(0)); tiff.push(0);
+  if (offset) { for (const c of offset) tiff.push(c.charCodeAt(0)); tiff.push(0, 0); }
   u16(4);
   u16(1); u16(2); u32(2); tiff.push(latRef.charCodeAt(0), 0, 0, 0);
-  u16(2); u16(5); u32(3); u32(130);
+  u16(2); u16(5); u32(3); u32(latAt);
   u16(3); u16(2); u32(2); tiff.push(lonRef.charCodeAt(0), 0, 0, 0);
-  u16(4); u16(5); u32(3); u32(154);
+  u16(4); u16(5); u32(3); u32(lonAt);
   u32(0);
+  if (tiff.length !== latAt) throw new Error('fixture layout mismatch ' + tiff.length + ' vs ' + latAt);
   for (const [n, d] of dms(lat)) { u32(n); u32(d); }
   for (const [n, d] of dms(lon)) { u32(n); u32(d); }
   return tiff;
+}
+// A recorded-track GPX: `days` is a list of {date: 'YYYY-MM-DD', n, from: [lat, lon], to: [lat, lon], ele: fn(i, n)}, one point every 30 s from 08:00Z.
+function recordedGpx(days, name = 'Morning Hike') {
+  const trks = days.map(d => {
+    const pts = Array.from({ length: d.n }, (_, i) => {
+      const t = i / (d.n - 1), lat = d.from[0] + (d.to[0] - d.from[0]) * t, lon = d.from[1] + (d.to[1] - d.from[1]) * t;
+      const time = new Date(Date.parse(d.date + 'T08:00:00Z') + i * 30000).toISOString();
+      return `<trkpt lat="${lat.toFixed(6)}" lon="${lon.toFixed(6)}"><ele>${d.ele(i, d.n).toFixed(1)}</ele><time>${time}</time></trkpt>`;
+    });
+    return `<trk><name>${name}</name><type>hiking</type><trkseg>${pts.join('')}</trkseg></trk>`;
+  });
+  return `<?xml version="1.0" encoding="UTF-8"?><gpx creator="StravaGPX" version="1.1" xmlns="http://www.topografix.com/GPX/1/1"><metadata><time>${days[0].date}T08:00:00Z</time></metadata>${trks.join('')}</gpx>`;
 }
 function jpegWithGps(o) {
   const app1 = [0x45, 0x78, 0x69, 0x66, 0, 0, ...tiffWithGps(o)];
@@ -263,23 +281,26 @@ await page.goto(base); await ready();
 const fx = path.join(root, 'test', 'fixture.jpg');
 fs.writeFileSync(fx, jpegWithGps({ lat: -33.8688, lon: 151.2093, date: '2026:09:20 14:30:15' }));
 fs.writeFileSync(fx + '.nogps.jpg', Buffer.from([0xFF, 0xD8, 0xFF, 0xD9]));
+const fxo = path.join(root, 'test', 'fixture-offset.jpg');
+fs.writeFileSync(fxo, jpegWithGps({ lat: 47.1, lon: 11.1, date: '2026:09:24 14:30:15', offset: '+02:00' }));
 const hx1 = path.join(root, 'test', 'fixture-early.heic'), hx2 = path.join(root, 'test', 'fixture-late.heic');
 fs.writeFileSync(hx1, heicWithGps({ lat: 46.5432, lon: 12.1234, date: '2026:09:21 09:15:00' }));
 fs.writeFileSync(hx2, heicWithGps({ lat: 46.6, lon: 12.2, date: '2026:09:22 17:45:30' }, 1500 * 1024));
 fs.writeFileSync(hx2 + '.noexif.heic', heicWithGps({ lat: 1, lon: 1, date: '2026:01:01 00:00:00' }).subarray(0, 40));
 check(fs.statSync(hx2).size > 1024 * 1024, 'late-Exif HEIC fixture is larger than the 1 MB head read');
-await page.setInputFiles('#files', [fx, fx + '.nogps.jpg', hx1, hx2, hx2 + '.noexif.heic']);
+await page.setInputFiles('#files', [fx, fx + '.nogps.jpg', hx1, hx2, hx2 + '.noexif.heic', fxo]);
 await page.waitForFunction(() => document.getElementById('msg').textContent.includes('added'));
 const fp = await page.evaluate(() => window.__hike.points());
-check(fp.length === 3, `3 points from 5 files (got ${fp.length})`);
+check(fp.length === 4, `4 points from 6 files (got ${fp.length})`);
 const byLat = Object.fromEntries(fp.map(p => [p.lat.toFixed(4), p]));
 check(byLat['-33.8688'] && near(byLat['-33.8688'].lon, 151.2093, 1e-4), 'JPEG: S/E signs and DMS');
 check(byLat['-33.8688'] && byLat['-33.8688'].t === new Date(2026, 8, 20, 14, 30, 15).getTime(), 'JPEG: DateTimeOriginal parsed');
 check(byLat['46.5432'] && near(byLat['46.5432'].lon, 12.1234, 1e-4) && byLat['46.5432'].t === new Date(2026, 8, 21, 9, 15, 0).getTime(), 'HEIC with Exif inside the first MB');
 check(byLat['46.6000'] && near(byLat['46.6000'].lon, 12.2, 1e-4) && byLat['46.6000'].t === new Date(2026, 8, 22, 17, 45, 30).getTime(), 'HEIC with Exif past the first MB (range read)');
-check((await page.locator('#msg').innerText()).includes('3 added, 2 without GPS'), 'files without EXIF reported, not fatal');
+check(byLat['47.1000'] && byLat['47.1000'].t === Date.UTC(2026, 8, 24, 12, 30, 15), 'OffsetTimeOriginal +02:00 makes the photo time absolute');
+check((await page.locator('#msg').innerText()).includes('4 added, 2 without GPS'), 'files without EXIF reported, not fatal');
 check(page.url().includes('#p=-33.8688'), 'URL updated with the picked points');
-for (const f of [fx, fx + '.nogps.jpg', hx1, hx2, hx2 + '.noexif.heic', rf]) fs.unlinkSync(f);
+for (const f of [fx, fx + '.nogps.jpg', hx1, hx2, hx2 + '.noexif.heic', fxo, rf]) fs.unlinkSync(f);
 
 // ---- 8a. hundreds of files: progress message, incremental drawing, second-pass read ----
 console.log('8a. 120 files, one with its Exif past the first 256 KB');
@@ -395,6 +416,7 @@ await page.waitForFunction(() => /days on trails/.test(document.getElementById('
 const nm = await page.locator('#msg2').innerText();
 check(nm.includes('network error'), `network failure named: ${nm}`);
 await page.unroute('**/brouter?*');
+await page.route('**/brouter?*', r => r.fulfill({ status: 503, body: 'mock: routing off' }));   // unroute dropped the default mock too
 
 // ---- 11. walk timeline ----
 console.log('11. walk timeline');
@@ -431,6 +453,51 @@ const vPause = +(await page.locator('#tl').inputValue());
 await page.waitForTimeout(300);
 check(+(await page.locator('#tl').inputValue()) === vPause && (await page.locator('#btn-play').innerText()) === '▶', 'paused');
 await page.evaluate(() => window.__hike.setTimeline(10000));
+
+// ---- 12. recorded GPX (Strava / AllTrails) ----
+console.log('12. recorded GPX');
+await page.goto(base + hash); await page.reload(); await ready();
+const tt = await page.evaluate(() => [...document.querySelectorAll('#days .tag')].length);
+check(tt === 0, 'no GPS tags before loading a recording');
+const rec1 = path.join(root, 'test', 'fixture-strava.gpx');
+fs.writeFileSync(rec1, recordedGpx([
+  { date: '2026-09-20', n: 200, from: [46.52, 12.00], to: [46.55, 12.01], ele: (i, n) => i < 150 ? 1000 + 500 * i / 149 : 1500 - 100 * (i - 149) / 50 },
+  { date: '2026-09-21', n: 100, from: [46.58, 12.02], to: [46.60, 12.03], ele: () => 1800 }]));
+await page.setInputFiles('#rec-file', rec1);
+await page.waitForFunction(() => document.getElementById('msg').textContent.includes('fixture-strava.gpx'));
+const rmsg = await page.locator('#msg').innerText();
+check(/fixture-strava\.gpx: .*Sep 20 3\.4 km, .*Sep 21 2\.4 km\./.test(rmsg), `two days reported: ${rmsg}`);
+check((await page.locator('#days .tag').count()) === 2 && (await lines('recorded')) === 2 && (await lines('straight')) === 1, 'days 1 and 2 recorded, day 3 straight');
+const rd = await page.evaluate(() => window.__hike.days());
+check(rd[0].trail.recorded && rd[0].trail.n === 200 && rd[0].trail.up >= 492 && rd[0].trail.up <= 500 && rd[0].trail.down >= 85 && rd[0].trail.down <= 100, `day 1 from the recording: ${rd[0].trail.n} points, up ${rd[0].trail.up}, down ${rd[0].trail.down}`);
+check(rd[0].dur === 199 * 30000 && rd[1].dur === 99 * 30000, 'day durations from the recording');
+const rtotal = await page.evaluate(() => window.__hike.timelineTotal());
+check(rtotal === (199 + 99) * 30000 + 60000, `walk time from recordings: ${rtotal / 60000} min`);
+const half = await page.evaluate((v) => window.__hike.timelineAt(v), 10000 * (199 * 30000 / 2) / rtotal);
+check(half.day === 0 && near(half.lat, 46.52 + 0.03 * 99.5 / 199, 1e-6) && near(half.ele, 1000 + 500 * 99.5 / 149, 0.5), `walker follows the recorded pace: lat ${half.lat.toFixed(6)}, ele ${half.ele.toFixed(1)}`);
+const rg2 = await page.evaluate(() => window.__hike.gpx());
+check(rg2.includes('day 1 (2026-09-20), recorded') && /<trkpt lat="46.52" lon="12"><ele>1000<\/ele><time>2026-09-20T08:00:00Z<\/time>/.test(rg2), 'GPX export keeps recorded time and elevation');
+await page.reload(); await ready();
+check((await page.locator('#days .tag').count()) === 2, 'recordings survive a reload');
+// a day with a recording but no photos still appears
+const rec2 = path.join(root, 'test', 'fixture-alltrails.gpx');
+fs.writeFileSync(rec2, recordedGpx([{ date: '2026-09-23', n: 50, from: [46.65, 12.05], to: [46.66, 12.06], ele: () => 2000 }], 'Rifugio walk'));
+await page.setInputFiles('#rec-file', rec2);
+await page.waitForFunction(() => document.getElementById('msg').textContent.includes('fixture-alltrails.gpx'));
+const rows4 = await page.locator('#days li').allInnerTexts();
+check(rows4.length === 4 && /0 · 1\.[34] km/.test(rows4[3]), `recorded-only day listed after the photo days (${JSON.stringify(rows4.map(r => r.replace(/\n/g, ' ')))})`);
+// no timestamps: becomes the reference route
+const rec3 = path.join(root, 'test', 'fixture-planned.gpx');
+fs.writeFileSync(rec3, routeGpx);
+await page.setInputFiles('#rec-file', rec3);
+await page.waitForFunction(() => document.getElementById('msg').textContent.includes('fixture-planned.gpx'));
+check((await page.locator('#msg').innerText()).includes('no timestamps, loaded as the reference route') && (await lines('ref-route')) === 2, 'planned GPX becomes the dashed reference');
+const thin = await page.evaluate(() => window.__hike.thinTrack([{ lat: 46.5, lon: 12, t: 0 }, { lat: 46.500001, lon: 12, t: 1000 }, { lat: 46.500002, lon: 12, t: 2000 }]).length);
+check(thin === 2, `points within 5 m and 60 s collapse to first and last (got ${thin})`);
+await page.click('#btn-clear-rec');
+check((await page.locator('#days .tag').count()) === 0 && (await lines('recorded')) === 0 && (await page.locator('#days li').count()) === 3, 'recordings cleared');
+await page.click('#btn-clear-route');
+for (const f of [rec1, rec2, rec3]) fs.unlinkSync(f);
 
 // ---- 9. tiles toggle and layout ----
 console.log('9. tiles and layout');

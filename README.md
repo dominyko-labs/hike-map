@@ -29,7 +29,8 @@ strips the location from every photo and the page reports them all as
 if you like; the link is all the page needs.
 
 The page reads the Exif block directly from JPEG and HEIC files, in the
-browser. It reads a few hundred KB per photo, shows "Reading N of M" as it goes and draws every 25 photos, so a few hundred photos take well under a minute once iOS has handed them over. Save the copies to On My iPhone rather than iCloud Drive: iCloud copies may have to download first, and that is the slow, silent part.
+browser. When the camera wrote its UTC offset (iPhones do), photo times are
+absolute, so they line up with a recorded GPX taken in another time zone. It reads a few hundred KB per photo, shows "Reading N of M" as it goes and draws every 25 photos, so a few hundred photos take well under a minute once iOS has handed them over. Save the copies to On My iPhone rather than iCloud Drive: iCloud copies may have to download first, and that is the slow, silent part.
 
 ## What the page shows
 
@@ -58,6 +59,22 @@ browser. It reads a few hundred KB per photo, shows "Reading N of M" as it goes 
 * **Tiles.** Street tiles from OpenStreetMap, or **Topo tiles** from
   OpenTopoMap with contour lines, huts and marked trails. The choice is
   remembered on the device.
+* **Recorded GPX.** The best input there is. Pick one or more GPX files
+  recorded by Strava, AllTrails, a watch or any tracking app. Each file is
+  split by calendar day, thinned to one point per 5 m (or 60 s), and used as
+  that day's track: the real path, the real pace on the timeline, and ascent
+  and descent from the recording's own elevation. A recorded day is tagged
+  **GPS** in the day list, is never sent to the router, and shows up even
+  when no photo was taken that day. Recordings are kept on the device;
+  **Clear recordings** forgets them. A GPX without timestamps (a planned
+  route or an AllTrails map rather than an activity) is loaded as the dashed
+  reference route instead.
+  * Strava: exports GPX on its website only, not in the app. In Safari open
+    strava.com, the activity, the three dots, *Export GPX*; the file lands in
+    Downloads in Files.
+  * AllTrails: on a recorded activity or a saved map, the share or *more* menu
+    offers *Download route* → GPX (on the website; the app has the same item
+    for members, unverified here).
 * **Trails + elevation.** Photos are only where you stopped, so the plain
   line between them cuts corners. As soon as the photos are on the map, the
   page sends each day's positions, in order, to [BRouter](https://brouter.de)
@@ -200,7 +217,9 @@ a file, from `routes/` and from a mocked Overpass response (including the
 failure path), off-route detection, trail routing against a mocked BRouter (profile
 fallback, request chunking, elevation gain, caching, failure), the walk
 timeline (time-to-position mapping on straight and routed days, fading,
-play and pause), persistence across reloads, the empty and malformed states, and the JPEG and HEIC Exif readers against fixtures it builds
+play and pause), recorded GPX (splitting by day, thinning, elevation from the
+file, recorded-only days, planned GPX becoming the reference), persistence
+across reloads, the empty and malformed states, and the JPEG and HEIC Exif readers against fixtures it builds
 byte by byte, including a HEIC whose Exif sits past the first megabyte. It
 resolves Playwright from the global npm root if it is not installed locally.
 
