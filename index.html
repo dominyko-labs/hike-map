@@ -77,13 +77,13 @@
   </div>
   <ul id="days" class="hidden"></ul>
   <div id="empty">
-    <p>Run the <b>Hike map</b> Shortcut on your photos and it opens this page with your route, one colour per day.</p>
+    <p>In Photos select the trip, Share, Options, turn <b>Location</b> on, Save to Files. Then <b>Pick photos</b> below and choose them from Files (Browse, not Photo Library). One colour per day.</p>
     <p>Add the official route (a GPX file, or fetch Alta Via 1 from OpenStreetMap) to see where you took your own way.</p>
   </div>
   <div class="row">
     <button id="btn-gpx" class="primary hidden" type="button">Download GPX</button>
     <button id="btn-copy" class="hidden" type="button">Copy link</button>
-    <label class="btn">Pick photos<input id="files" type="file" accept="image/jpeg,.jpg,.jpeg" multiple></label>
+    <label class="btn">Pick photos<input id="files" type="file" accept="image/*,.heic,.heif,.jpg,.jpeg" multiple></label>
   </div>
   <div class="row">
     <label class="btn">Route GPX<input id="route-file" type="file" accept=".gpx,application/gpx+xml,application/xml,text/xml"></label>
@@ -118,6 +118,8 @@
   function parseTime(s) {
     if (s === undefined || s === '') return NaN;
     if (/^\d+$/.test(s)) { var n = Number(s); return n > 1e11 ? n : n * 1000; }
+    var m = /^(\d{4}):(\d\d):(\d\d)[ T](\d\d):(\d\d):(\d\d)/.exec(s);
+    if (m) return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
     var ms = Date.parse(s);
     return isNaN(ms) ? NaN : ms;
   }
@@ -126,13 +128,27 @@
     str.split(/[;\n]+/).forEach(function (entry) {
       entry = entry.trim();
       if (!entry) return;
-      var f = entry.split(',');
-      var lat = parseFloat(f[0]), lon = parseFloat(f[1]);
+      var f, piped = entry.indexOf('|') !== -1;
+      if (piped) { f = entry.split('|').map(function (x) { return x.trim(); }); }
+      else { f = entry.split(','); f = [f[0], f[1], f.slice(2).join(',')]; }
+      var lat = parseCoord(f[0], 'S', piped), lon = parseCoord(f[1], 'W', piped);
       if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) { bad++; return; }
-      out.push({ lat: lat, lon: lon, t: parseTime(f.slice(2).join(',')) });
+      out.push({ lat: lat, lon: lon, t: parseTime((f[2] || '').trim()) });
     });
     return { points: out, bad: bad };
   }
+  // "46.55", "46.55N", "46,55 S" (decimal comma only in the |-separated form) -> signed number
+  function parseCoord(str, negLetter, allowComma) {
+    if (str === undefined) return NaN;
+    var m = /^\s*([-+]?[\d.,]+)\s*([NSEW])?\s*$/i.exec(str);
+    if (!m) return NaN;
+    var num = m[1];
+    if (allowComma && num.indexOf('.') === -1) num = num.replace(',', '.');
+    var v = parseFloat(num);
+    if (m[2] && m[2].toUpperCase() === negLetter) v = -Math.abs(v);
+    return v;
+  }
+
   function parseHash(hash) {
     var h = hash.replace(/^#/, '');
     if (!h) return null;
@@ -358,6 +374,86 @@
     return isFinite(res.lat) && isFinite(res.lon) ? res : null;
   }
 
+  // ---------- HEIF (HEIC) : find the Exif item through meta/iinf/iloc ----------
+  function heifExifItem(dv) {
+    var n = dv.byteLength;
+    var str4 = function (p) { return String.fromCharCode(dv.getUint8(p), dv.getUint8(p + 1), dv.getUint8(p + 2), dv.getUint8(p + 3)); };
+    var box = function (p, end) {
+      if (p + 8 > end) return null;
+      var size = dv.getUint32(p), type = str4(p + 4), hdr = 8;
+      if (size === 1) { size = Number(dv.getBigUint64(p + 8)); hdr = 16; } else if (size === 0) size = end - p;
+      if (size < hdr) return null;
+      return { type: type, start: p + hdr, end: Math.min(end, p + size) };
+    };
+    var p = 0, meta = null, ftyp = false, b;
+    while (p < n && (b = box(p, n))) { if (b.type === 'ftyp') ftyp = true; if (b.type === 'meta') { meta = b; break; } p = b.end; }
+    if (!ftyp || !meta) return null;
+    var exifId = -1, iloc = null, q = meta.start + 4, c;
+    while (q < meta.end && (c = box(q, meta.end))) {
+      if (c.type === 'iinf') {
+        var v = dv.getUint8(c.start), r = c.start + 4;
+        var cnt = v === 0 ? dv.getUint16(r) : dv.getUint32(r); r += v === 0 ? 2 : 4;
+        for (var i = 0, e; i < cnt && (e = box(r, c.end)); i++) {
+          if (e.type === 'infe') {
+            var ev = dv.getUint8(e.start), s = e.start + 4;
+            if (ev >= 2) {
+              var id = ev === 2 ? dv.getUint16(s) : dv.getUint32(s); s += (ev === 2 ? 2 : 4) + 2;
+              if (str4(s) === 'Exif') exifId = id;
+            }
+          }
+          r = e.end;
+        }
+      }
+      if (c.type === 'iloc') iloc = c;
+      q = c.end;
+    }
+    if (exifId < 0 || !iloc) return null;
+    var ver = dv.getUint8(iloc.start), s2 = iloc.start + 4;
+    var b1 = dv.getUint8(s2), b2 = dv.getUint8(s2 + 1); s2 += 2;
+    var offSize = b1 >> 4, lenSize = b1 & 15, baseSize = b2 >> 4, idxSize = ver >= 1 ? (b2 & 15) : 0;
+    var count = ver < 2 ? dv.getUint16(s2) : dv.getUint32(s2); s2 += ver < 2 ? 2 : 4;
+    var readN = function (size) { var val = 0; if (size === 4) val = dv.getUint32(s2); else if (size === 8) val = Number(dv.getBigUint64(s2)); s2 += size; return val; };
+    for (var k = 0; k < count && s2 < iloc.end; k++) {
+      var itemId = ver < 2 ? dv.getUint16(s2) : dv.getUint32(s2); s2 += ver < 2 ? 2 : 4;
+      var method = 0; if (ver >= 1) { method = dv.getUint16(s2) & 15; s2 += 2; }
+      s2 += 2;
+      var base = readN(baseSize), extents = dv.getUint16(s2); s2 += 2;
+      for (var x = 0; x < extents; x++) {
+        if (idxSize) readN(idxSize);
+        var off = readN(offSize), len = readN(lenSize);
+        if (itemId === exifId && x === 0) return method === 0 ? { offset: base + off, length: len } : null;
+      }
+    }
+    return null;
+  }
+  // Exif item payload: u32 tiff header offset, then the Exif block
+  function exifFromHeifItem(dv) {
+    if (dv.byteLength < 8) return null;
+    var tiffAt = 4 + dv.getUint32(0);
+    if (tiffAt + 4 <= dv.byteLength && dv.getUint32(tiffAt) === 0x45786966) tiffAt += 6;   // "Exif\0\0" prefix present
+    return tiffAt + 8 <= dv.byteLength ? parseTiff(dv, tiffAt, dv.byteLength - tiffAt) : null;
+  }
+  function readSlice(file, from, to) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () { resolve(r.result); };
+      r.onerror = function () { reject(r.error); };
+      r.readAsArrayBuffer(file.slice(from, to));
+    });
+  }
+  var HEAD = 1024 * 1024;
+  // Promise of {lat, lon, t} or null for a JPEG or HEIC file
+  function readGps(file) {
+    return readSlice(file, 0, HEAD).then(function (buf) {
+      var dv = new DataView(buf);
+      if (dv.byteLength >= 2 && dv.getUint16(0) === 0xFFD8) return exifGps(buf);
+      var item = heifExifItem(dv);
+      if (!item || !item.length) return null;
+      if (item.offset + item.length <= buf.byteLength) return exifFromHeifItem(new DataView(buf, item.offset, item.length));
+      return readSlice(file, item.offset, item.offset + item.length).then(function (b2) { return exifFromHeifItem(new DataView(b2)); });
+    }).catch(function () { return null; });
+  }
+
   // ---------- rendering ----------
   function $(id) { return document.getElementById(id); }
   function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
@@ -540,25 +636,17 @@
     var files = Array.prototype.slice.call(fileList);
     if (!files.length) return;
     setMsg('Reading ' + files.length + ' photo' + (files.length === 1 ? '' : 's') + '…');
-    var added = 0, none = 0, done = 0;
-    files.forEach(function (f) {
-      var r = new FileReader();
-      r.onload = function () {
-        var g = null;
-        try { g = exifGps(r.result); } catch (e) { g = null; }
+    var added = 0, none = 0;
+    files.reduce(function (chain, f) {
+      return chain.then(function () { return readGps(f); }).then(function (g) {
         if (g) { points.push(g); added++; } else { none++; }
-        finish();
-      };
-      r.onerror = function () { none++; finish(); };
-      r.readAsArrayBuffer(f.slice(0, 512 * 1024));
-    });
-    function finish() {
-      if (++done < files.length) return;
+      });
+    }, Promise.resolve()).then(function () {
       skipped += none;
       render();
-      setMsg(added + ' added' + (none ? ', ' + none + ' without GPS (iOS strips location from photos picked from the library; save them to Files first)' : '') + '.');
+      setMsg(added + ' added' + (none ? ', ' + none + ' without GPS (pick from Files with Location kept on, not from the Photo Library, which strips it)' : '') + '.');
       if (points.length) history.replaceState(null, '', shareLink());
-    }
+    });
   }
 
   // ---------- wiring ----------
@@ -587,7 +675,7 @@
     days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, color: g.color }; }); },
     route: function () { return route; },
     gpx: gpx, shareLink: shareLink, totalKm: totalKm, parsePointList: parsePointList, exifGps: exifGps,
-    parseGpx: parseGpx, parseOverpass: parseOverpass, distToRouteM: distToRouteM
+    parseGpx: parseGpx, parseOverpass: parseOverpass, distToRouteM: distToRouteM, heifExifItem: heifExifItem, parseCoord: parseCoord
   };
 })();
 </script>

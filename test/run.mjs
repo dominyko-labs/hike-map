@@ -23,7 +23,7 @@ const hv = (a, b) => { const dLat = (b[0] - a[0]) * toRad, dLon = (b[1] - a[1]) 
 const pathKm = pts => { let d = 0; for (let i = 1; i < pts.length; i++) d += hv(pts[i - 1], pts[i]); return d; };
 
 // ---- fixture: a minimal JPEG whose APP1 carries GPS + DateTimeOriginal (little-endian TIFF) ----
-function jpegWithGps({ lat, lon, date }) {
+function tiffWithGps({ lat, lon, date }) {
   const latRef = lat < 0 ? 'S' : 'N', lonRef = lon < 0 ? 'W' : 'E';
   const dms = v => { v = Math.abs(v); const d = Math.floor(v), m = Math.floor((v - d) * 60), s = Math.round(((v - d) * 60 - m) * 60 * 1000); return [[d, 1], [m, 1], [s, 1000]]; };
   const tiff = [];
@@ -46,9 +46,34 @@ function jpegWithGps({ lat, lon, date }) {
   u32(0);
   for (const [n, d] of dms(lat)) { u32(n); u32(d); }
   for (const [n, d] of dms(lon)) { u32(n); u32(d); }
-  const app1 = [0x45, 0x78, 0x69, 0x66, 0, 0, ...tiff];
+  return tiff;
+}
+function jpegWithGps(o) {
+  const app1 = [0x45, 0x78, 0x69, 0x66, 0, 0, ...tiffWithGps(o)];
   const len = app1.length + 2;
   return Buffer.from([0xFF, 0xD8, 0xFF, 0xE1, len >> 8, len & 255, ...app1, 0xFF, 0xD9]);
+}
+// A minimal HEIF: ftyp, meta{hdlr, pitm, iinf(infe v2 'Exif'), iloc(v0)}, filler, then the Exif item.
+// `fillerBytes` pushes the Exif item that far into the file (0 = right after meta).
+function heicWithGps(o, fillerBytes = 0) {
+  const be32 = n => [(n >>> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255];
+  const be16 = n => [(n >> 8) & 255, n & 255];
+  const cc = s => [...s].map(c => c.charCodeAt(0));
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...cc(type), ...body]; };
+  const full = (type, ver, ...parts) => box(type, [ver, 0, 0, 0], ...parts);
+  const exifItem = [...be32(6), ...cc('Exif'), 0, 0, ...tiffWithGps(o)];
+  const ftyp = box('ftyp', cc('heic'), be32(0), cc('mif1'), cc('heic'));
+  const hdlr = full('hdlr', 0, be32(0), cc('pict'), be32(0), be32(0), be32(0), [0]);
+  const pitm = full('pitm', 0, be16(1));
+  const infe = full('infe', 2, be16(1), be16(0), cc('Exif'), [0]);
+  const iinf = full('iinf', 0, be16(1), infe);
+  const ilocFor = off => full('iloc', 0, [0x44, 0x00], be16(1), be16(1), be16(0), be16(1), be32(off), be32(exifItem.length));
+  const metaLen = 12 + hdlr.length + pitm.length + iinf.length + ilocFor(0).length;
+  const filler = fillerBytes ? box('free', new Array(fillerBytes).fill(0)) : [];
+  const exifOff = ftyp.length + metaLen + filler.length;
+  const meta = full('meta', 0, hdlr, pitm, iinf, ilocFor(exifOff));
+  if (meta.length !== metaLen) throw new Error('meta size mismatch');
+  return Buffer.from([...ftyp, ...meta, ...filler, ...exifItem, ...box('mdat', cc('xx'))]);
 }
 // A reference route running north along lon 12.0 from 46.50 to 46.60, as a GPX track with two segments.
 const routeGpx = `<?xml version="1.0"?><gpx version="1.1" creator="t"><metadata><name>Alta Via 1 test</name></metadata>
@@ -210,14 +235,33 @@ await page.goto(base); await ready();
 const fx = path.join(root, 'test', 'fixture.jpg');
 fs.writeFileSync(fx, jpegWithGps({ lat: -33.8688, lon: 151.2093, date: '2026:09:20 14:30:15' }));
 fs.writeFileSync(fx + '.nogps.jpg', Buffer.from([0xFF, 0xD8, 0xFF, 0xD9]));
-await page.setInputFiles('#files', [fx, fx + '.nogps.jpg']);
+const hx1 = path.join(root, 'test', 'fixture-early.heic'), hx2 = path.join(root, 'test', 'fixture-late.heic');
+fs.writeFileSync(hx1, heicWithGps({ lat: 46.5432, lon: 12.1234, date: '2026:09:21 09:15:00' }));
+fs.writeFileSync(hx2, heicWithGps({ lat: 46.6, lon: 12.2, date: '2026:09:22 17:45:30' }, 1500 * 1024));
+fs.writeFileSync(hx2 + '.noexif.heic', heicWithGps({ lat: 1, lon: 1, date: '2026:01:01 00:00:00' }).subarray(0, 40));
+check(fs.statSync(hx2).size > 1024 * 1024, 'late-Exif HEIC fixture is larger than the 1 MB head read');
+await page.setInputFiles('#files', [fx, fx + '.nogps.jpg', hx1, hx2, hx2 + '.noexif.heic']);
 await page.waitForFunction(() => document.getElementById('msg').textContent.includes('added'));
 const fp = await page.evaluate(() => window.__hike.points());
-check(fp.length === 1 && near(fp[0].lat, -33.8688, 1e-4) && near(fp[0].lon, 151.2093, 1e-4), `1 point, S/E signs: ${fp[0] && fp[0].lat}, ${fp[0] && fp[0].lon}`);
-check(fp.length === 1 && fp[0].t === new Date(2026, 8, 20, 14, 30, 15).getTime(), 'DateTimeOriginal parsed');
-check((await page.locator('#msg').innerText()).includes('1 without GPS'), 'file without EXIF reported, not fatal');
+check(fp.length === 3, `3 points from 5 files (got ${fp.length})`);
+const byLat = Object.fromEntries(fp.map(p => [p.lat.toFixed(4), p]));
+check(byLat['-33.8688'] && near(byLat['-33.8688'].lon, 151.2093, 1e-4), 'JPEG: S/E signs and DMS');
+check(byLat['-33.8688'] && byLat['-33.8688'].t === new Date(2026, 8, 20, 14, 30, 15).getTime(), 'JPEG: DateTimeOriginal parsed');
+check(byLat['46.5432'] && near(byLat['46.5432'].lon, 12.1234, 1e-4) && byLat['46.5432'].t === new Date(2026, 8, 21, 9, 15, 0).getTime(), 'HEIC with Exif inside the first MB');
+check(byLat['46.6000'] && near(byLat['46.6000'].lon, 12.2, 1e-4) && byLat['46.6000'].t === new Date(2026, 8, 22, 17, 45, 30).getTime(), 'HEIC with Exif past the first MB (range read)');
+check((await page.locator('#msg').innerText()).includes('3 added, 2 without GPS'), 'files without EXIF reported, not fatal');
 check(page.url().includes('#p=-33.8688'), 'URL updated with the picked points');
-fs.unlinkSync(fx); fs.unlinkSync(fx + '.nogps.jpg'); fs.unlinkSync(rf);
+for (const f of [fx, fx + '.nogps.jpg', hx1, hx2, hx2 + '.noexif.heic', rf]) fs.unlinkSync(f);
+
+// ---- 8b. link entry formats the Shortcut produces ----
+console.log('8b. |-separated entries with N/S/E/W and decimal commas');
+const ent = await page.evaluate(() => window.__hike.parsePointList('46,5512N|12,0123E|2026:09:20 08:15:00;46.60S|12.30W|2026-09-21T10:00:00;46.7|12.4|;x|y|z;47,1|12,5|1789902000'));
+check(ent.points.length === 4 && ent.bad === 1, `4 parsed, 1 bad (got ${ent.points.length}, ${ent.bad})`);
+check(near(ent.points[0].lat, 46.5512, 1e-9) && near(ent.points[0].lon, 12.0123, 1e-9) && ent.points[0].t === new Date(2026, 8, 20, 8, 15, 0).getTime(), 'decimal comma + N/E + EXIF time');
+check(ent.points[1].lat === -46.6 && ent.points[1].lon === -12.3, 'S and W make the values negative');
+check(isNaN(ent.points[2].t) && ent.points[3].t === 1789902000000, 'empty time allowed; epoch seconds in |-form');
+const legacy = await page.evaluate(() => window.__hike.parsePointList('46.52,12.00,2026-09-20T08:00:00;46.55,12.01'));
+check(legacy.points.length === 2 && legacy.points[1].lon === 12.01, 'comma form still parses');
 
 // ---- 9. tiles toggle and layout ----
 console.log('9. tiles and layout');
