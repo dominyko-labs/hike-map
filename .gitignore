@@ -1,2 +1,4 @@
 test/fixture*.jpg
+test/*-fixture.gpx
+routes/zz-*.gpx
 .DS_Store
