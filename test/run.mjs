@@ -253,6 +253,37 @@ check((await page.locator('#msg').innerText()).includes('3 added, 2 without GPS'
 check(page.url().includes('#p=-33.8688'), 'URL updated with the picked points');
 for (const f of [fx, fx + '.nogps.jpg', hx1, hx2, hx2 + '.noexif.heic', rf]) fs.unlinkSync(f);
 
+// ---- 8a. hundreds of files: progress message, incremental drawing, second-pass read ----
+console.log('8a. 120 files, one with its Exif past the first 256 KB');
+await page.goto(base); await ready();
+const many = [];
+for (let i = 0; i < 119; i++) {
+  const f = path.join(root, 'test', `fixture-many-${i}.heic`);
+  fs.writeFileSync(f, heicWithGps({ lat: 46.5 + i * 0.001, lon: 12.0 + i * 0.001, date: `2026:09:${20 + (i % 3)} ${String(8 + (i % 10)).padStart(2, '0')}:00:00` }));
+  many.push(f);
+}
+// a JPEG whose APP1 comes after five 60 KB COM segments (segment lengths are 16-bit): not in the
+// first 256 KB, found on the full read
+const late = path.join(root, 'test', 'fixture-late-app1.jpg');
+const com = 60 * 1024, comSeg = Buffer.concat([Buffer.from([0xFF, 0xFE, (com + 2) >> 8 & 255, (com + 2) & 255]), Buffer.alloc(com)]);
+const jpg = jpegWithGps({ lat: 46.9, lon: 12.9, date: '2026:09:23 12:00:00' });
+fs.writeFileSync(late, Buffer.concat([Buffer.from([0xFF, 0xD8]), comSeg, comSeg, comSeg, comSeg, comSeg, jpg.subarray(2)]));
+check(fs.statSync(late).size > 256 * 1024, 'late-APP1 fixture is larger than the first read');
+many.push(late);
+const seen = [];
+const poll = setInterval(async () => { try { seen.push(await page.locator('#msg').innerText()); } catch {} }, 20);
+await page.setInputFiles('#files', many);
+await page.waitForFunction(() => document.getElementById('msg').textContent.includes('added'));
+clearInterval(poll);
+const mp = await page.evaluate(() => window.__hike.points());
+check(mp.length === 120, `120 points read (got ${mp.length})`);
+check(mp.some(p => near(p.lat, 46.9, 1e-6)), 'late-APP1 JPEG found by the second, full read');
+check(seen.some(m => /^Reading \d+ of 120…/.test(m)), `progress message seen while reading (${seen.filter(m => m.startsWith('Reading')).length} samples)`);
+check((await page.locator('#msg').innerText()).startsWith('120 added.'), 'final message');
+check((await page.locator('#days li').count()) === 4, 'four days listed');
+check(await page.locator('#files').isEnabled(), 'picker re-enabled');
+for (const f of many) fs.unlinkSync(f);
+
 // ---- 8b. link entry formats the Shortcut produces ----
 console.log('8b. |-separated entries with N/S/E/W and decimal commas');
 const ent = await page.evaluate(() => window.__hike.parsePointList('46,5512N|12,0123E|2026:09:20 08:15:00;46.60S|12.30W|2026-09-21T10:00:00;46.7|12.4|;x|y|z;47,1|12,5|1789902000'));

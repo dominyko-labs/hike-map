@@ -441,17 +441,25 @@
       r.readAsArrayBuffer(file.slice(from, to));
     });
   }
-  var HEAD = 1024 * 1024;
-  // Promise of {lat, lon, t} or null for a JPEG or HEIC file
+  var HEAD = 256 * 1024, HEAD_MAX = 16 * 1024 * 1024;
+  function gpsFromHead(file, buf) {
+    var dv = new DataView(buf);
+    if (dv.byteLength >= 2 && dv.getUint16(0) === 0xFFD8) return exifGps(buf);
+    var item = heifExifItem(dv);
+    if (!item || !item.length) return null;
+    if (item.offset + item.length <= buf.byteLength) return exifFromHeifItem(new DataView(buf, item.offset, item.length));
+    return readSlice(file, item.offset, item.offset + item.length).then(function (b2) { return exifFromHeifItem(new DataView(b2)); });
+  }
+  // Promise of {lat, lon, t} or null for a JPEG or HEIC file. The metadata of a phone photo sits in
+  // the first few hundred KB, so that is all that is read; only when nothing is found there is the
+  // whole file (up to 16 MB) read once more.
   function readGps(file) {
-    return readSlice(file, 0, HEAD).then(function (buf) {
-      var dv = new DataView(buf);
-      if (dv.byteLength >= 2 && dv.getUint16(0) === 0xFFD8) return exifGps(buf);
-      var item = heifExifItem(dv);
-      if (!item || !item.length) return null;
-      if (item.offset + item.length <= buf.byteLength) return exifFromHeifItem(new DataView(buf, item.offset, item.length));
-      return readSlice(file, item.offset, item.offset + item.length).then(function (b2) { return exifFromHeifItem(new DataView(b2)); });
-    }).catch(function () { return null; });
+    return readSlice(file, 0, HEAD).then(function (buf) { return gpsFromHead(file, buf); })
+      .then(function (g) {
+        if (g || file.size <= HEAD) return g;
+        return readSlice(file, 0, HEAD_MAX).then(function (buf) { return gpsFromHead(file, buf); });
+      })
+      .catch(function () { return null; });
   }
 
   // ---------- rendering ----------
@@ -635,17 +643,22 @@
   function onFiles(fileList) {
     var files = Array.prototype.slice.call(fileList);
     if (!files.length) return;
-    setMsg('Reading ' + files.length + ' photo' + (files.length === 1 ? '' : 's') + '…');
-    var added = 0, none = 0;
+    var total = files.length, added = 0, none = 0, done = 0;
+    setMsg('Reading 1 of ' + total + '…');
+    $('files').disabled = true;
     files.reduce(function (chain, f) {
       return chain.then(function () { return readGps(f); }).then(function (g) {
         if (g) { points.push(g); added++; } else { none++; }
+        done++;
+        if (done < total) setMsg('Reading ' + (done + 1) + ' of ' + total + '… ' + added + ' with GPS so far');
+        if (done % 25 === 0 && done < total) render();      // draw as it goes, so hundreds of photos show progress on the map
       });
     }, Promise.resolve()).then(function () {
       skipped += none;
       render();
       setMsg(added + ' added' + (none ? ', ' + none + ' without GPS (pick from Files with Location kept on, not from the Photo Library, which strips it)' : '') + '.');
       if (points.length) history.replaceState(null, '', shareLink());
+      $('files').disabled = false;
     });
   }
 

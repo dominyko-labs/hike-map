@@ -29,7 +29,7 @@ strips the location from every photo and the page reports them all as
 if you like; the link is all the page needs.
 
 The page reads the Exif block directly from JPEG and HEIC files, in the
-browser. Large trips take a few seconds; it reads about 1 MB per photo.
+browser. It reads a few hundred KB per photo, shows "Reading N of M" as it goes and draws every 25 photos, so a few hundred photos take well under a minute once iOS has handed them over. Save the copies to On My iPhone rather than iCloud Drive: iCloud copies may have to download first, and that is the slow, silent part.
 
 ## What the page shows
 
