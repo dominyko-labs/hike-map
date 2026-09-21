@@ -43,8 +43,12 @@ browser. It reads a few hundred KB per photo, shows "Reading N of M" as it goes 
     from a hiking app). Tracks and routes both work.
   * **Alta Via 1 from OSM**: fetches OpenStreetMap relation 177743, "Alta via
     n. 1 delle Dolomiti - Dolomiten-Höhenweg Nr. 1", through the Overpass API
-    (with a name search in the Dolomites as fallback) and draws all its ways.
-    Takes a few seconds; needs network; the button reports what it got.
+    and draws all its ways. Three Overpass servers are tried in turn (the main
+    one answers 504 when busy), with a name search in the Dolomites as
+    fallback if the relation is ever renumbered. Takes a few seconds; the
+    button reports what it got. **Save route GPX** then writes the fetched
+    route to Files, so it can be loaded with **Route GPX** or uploaded to
+    `routes/` and linked with `&r=`, without asking Overpass again.
   * `&r=<name>` in the link loads `routes/<name>.gpx` from this site. See
     `routes/README.md` for how to upload one from the phone.
 * **Off route.** With a reference loaded, each photo more than 250 m from the

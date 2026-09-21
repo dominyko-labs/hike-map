@@ -105,6 +105,7 @@
   <div class="row">
     <label class="btn">Route GPX<input id="route-file" type="file" accept=".gpx,application/gpx+xml,application/xml,text/xml"></label>
     <button id="btn-osm" type="button">Alta Via 1 from OSM</button>
+    <button id="btn-route-gpx" class="hidden" type="button">Save route GPX</button>
     <button id="btn-clear-route" class="hidden" type="button">Clear route</button>
     <button id="btn-tiles" type="button">Topo tiles</button>
   </div>
@@ -118,7 +119,8 @@
   'use strict';
 
   var OFF_ROUTE_M = 250;                      // a photo further than this from the reference counts as "off route"
-  var OVERPASS = 'https://overpass-api.de/api/interpreter';
+  var OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'];
+  var OVERPASS_TIMEOUT_MS = 90000;
   var AV1_RELATION = 177743;                  // "Alta via n. 1 delle Dolomiti - Dolomiten-Höhenweg Nr. 1" on openstreetmap.org
   var AV1_BBOX = '46.0,11.7,46.9,12.4';       // south,west,north,east: the Dolomites between Braies and Belluno
   var DOLOMITES = [46.45, 12.05];
@@ -565,6 +567,7 @@
   function renderRoute() {
     refLayer.clearLayers();
     $('btn-clear-route').classList.toggle('hidden', !route);
+    $('btn-route-gpx').classList.toggle('hidden', !route);
     if (!route) return;
     route.segs.forEach(function (seg) {
       L.polyline(seg.map(function (p) { return [p.lat, p.lon]; }),
@@ -690,23 +693,60 @@
       var r = parseGpx(text); setRoute(r, false); setMsg('Route "' + r.name + '" loaded from the site.');
     }).catch(function (e) { setMsg('Route not loaded: ' + e.message, true); });
   }
+  // POST a query to the Overpass servers in turn; the first good answer wins.
+  function overpass(q) {
+    var i = 0;
+    var next = function (lastErr) {
+      if (i >= OVERPASS.length) throw lastErr || new Error('no Overpass server answered');
+      var url = OVERPASS[i++], host = url.replace(/^https?:\/\//, '').split('/')[0];
+      var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+      var timer = ctl ? setTimeout(function () { ctl.abort(); }, OVERPASS_TIMEOUT_MS) : null;
+      var opts = { method: 'POST', body: 'data=' + encodeURIComponent(q), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } };
+      if (ctl) opts.signal = ctl.signal;
+      return fetch(url, opts).then(function (res) {
+        clearTimeout(timer);
+        if (!res.ok) throw new Error(host + ' answered ' + res.status);
+        return res.json();
+      }).catch(function (e) {
+        clearTimeout(timer);
+        if (e && e.name === 'AbortError') e = new Error(host + ': no answer within ' + Math.round(OVERPASS_TIMEOUT_MS / 1000) + ' s');
+        else if (e && e.name === 'TypeError') e = new Error(host + ': network error');
+        return next(e);
+      });
+    };
+    return next(null);
+  }
   function fetchAv1() {
-    // The relation by id, plus a name search in case it is ever renumbered. The union comes first and
-    // the recursion after it: inside a union block, statements cannot see each other's results.
-    var q = '[out:json][timeout:90];' +
-      '(relation(' + AV1_RELATION + ');relation["route"="hiking"]["name"~"alta via.*(n\\\\.|nr\\\\.|n|nr)? ?1( |$|[^0-9])",i](' + AV1_BBOX + '););' +
-      'out tags;>>;out geom;';
+    // Light queries: the relation by id, recursed to its ways only (no relation tags, no bare nodes).
+    // The recursion follows the selection statement; inside a union block it would see an empty set.
+    var byId = '[out:json][timeout:60];relation(' + AV1_RELATION + ');>>;way._;out geom;';
+    var byName = '[out:json][timeout:60];relation["route"="hiking"]["name"~"alta via.*(n\\\\.|nr\\\\.|n|nr)? ?1( |$|[^0-9])",i](' + AV1_BBOX + ');>>;way._;out geom;';
     setMsg('Fetching Alta Via 1 from OpenStreetMap…');
     $('btn-osm').disabled = true;
-    fetch(OVERPASS, { method: 'POST', body: 'data=' + encodeURIComponent(q),
-                      headers: { 'Content-Type': 'application/x-www-form-urlencoded' } })
-      .then(function (res) { if (!res.ok) throw new Error('Overpass answered ' + res.status); return res.json(); })
-      .then(function (json) {
-        var r = parseOverpass(json); setRoute(r, true);
-        setMsg('"' + r.name + '" loaded from OpenStreetMap: ' + r.segs.length + ' ways, ' + countPts(r) + ' points. Saved on this device.');
-      })
-      .catch(function (e) { setMsg('OpenStreetMap fetch failed: ' + e.message, true); })
+    overpass(byId).then(function (json) {
+      try { return parseOverpass(json); }
+      catch (e) { return overpass(byName).then(parseOverpass); }   // renumbered or moved: search by name
+    }).then(function (r) {
+      r.name = 'Alta Via 1';
+      setRoute(r, true);
+      setMsg('"' + r.name + '" loaded from OpenStreetMap: ' + r.segs.length + ' ways, ' + countPts(r) + ' points. Saved on this device; "Save route GPX" keeps a copy in Files.');
+    }).catch(function (e) { setMsg('OpenStreetMap fetch failed: ' + e.message + '. Try again in a minute, or load a GPX.', true); })
       .then(function () { $('btn-osm').disabled = false; });
+  }
+  // The reference route as GPX: one track, one segment per way.
+  function routeGpx() {
+    var n = esc(route.name || 'route');
+    var lines = ['<?xml version="1.0" encoding="UTF-8"?>',
+      '<gpx version="1.1" creator="hike-map" xmlns="http://www.topografix.com/GPX/1/1">',
+      '  <metadata><name>' + n + '</name><copyright author="OpenStreetMap contributors"><license>https://www.openstreetmap.org/copyright</license></copyright></metadata>',
+      '  <trk><name>' + n + '</name>'];
+    route.segs.forEach(function (seg) {
+      lines.push('    <trkseg>');
+      seg.forEach(function (p) { lines.push('      <trkpt lat="' + p.lat + '" lon="' + p.lon + '"/>'); });
+      lines.push('    </trkseg>');
+    });
+    lines.push('  </trk>', '</gpx>', '');
+    return lines.join('\n');
   }
 
   // ---------- timeline: where you were at any moment of the walk ----------
@@ -968,6 +1008,9 @@
   $('files').addEventListener('change', function (e) { onFiles(e.target.files); e.target.value = ''; });
   $('route-file').addEventListener('change', function (e) { if (e.target.files[0]) loadRouteFile(e.target.files[0]); e.target.value = ''; });
   $('btn-osm').addEventListener('click', fetchAv1);
+  $('btn-route-gpx').addEventListener('click', function () {
+    if (route) download(routeGpx(), (route.name || 'route').replace(/[^\w.-]+/g, '_') + '.gpx', 'application/gpx+xml');
+  });
   $('btn-clear-route').addEventListener('click', function () { setRoute(null, true); setMsg('Route cleared.'); });
   $('btn-tiles').addEventListener('click', toggleTiles);
   $('btn-trails').addEventListener('click', routeAllDays);
@@ -984,7 +1027,7 @@
     setTimeline: function (v) { $('tl').value = v; applyTimeline(v); },
     route: function () { return route; },
     gpx: gpx, shareLink: shareLink, totalKm: totalKm, parsePointList: parsePointList, exifGps: exifGps,
-    parseGpx: parseGpx, parseOverpass: parseOverpass, distToRouteM: distToRouteM, heifExifItem: heifExifItem, parseCoord: parseCoord
+    parseGpx: parseGpx, parseOverpass: parseOverpass, distToRouteM: distToRouteM, routeGpx: routeGpx, heifExifItem: heifExifItem, parseCoord: parseCoord
   };
 })();
 </script>

@@ -195,9 +195,11 @@ check((await page.locator('#msg').innerText()).includes('Bad route name'), 'path
 
 // ---- 6. Overpass fetch, mocked ----
 console.log('6. Alta Via 1 from OSM (mocked Overpass)');
-let sentQuery = '';
+let sentQuery = ''; const opHosts = [];
 await page.route('**/api/interpreter', async r => {
+  const host = new URL(r.request().url()).host; opHosts.push(host);
   sentQuery = decodeURIComponent(r.request().postData().replace(/^data=/, ''));
+  if (host === 'overpass-api.de') { await r.fulfill({ status: 504, body: 'Gateway Timeout' }); return; }   // busy main server: fall through to a mirror
   await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ elements: [
     { type: 'relation', id: 1, tags: { name: 'Alta Via 1', route: 'hiking' }, members: [] },
     { type: 'way', id: 2, geometry: [{ lat: 46.5, lon: 12.0 }, { lat: 46.55, lon: 12.0 }] },
@@ -208,8 +210,12 @@ await page.route('**/api/interpreter', async r => {
 await page.goto(base + hash); await ready();
 await page.click('#btn-osm');
 await page.waitForFunction(() => document.getElementById('msg').textContent.includes('OpenStreetMap:'));
-check((await page.locator('#msg').innerText()).includes('"Alta Via 1" loaded from OpenStreetMap: 2 ways, 5 points'), 'relation name, way and point counts reported');
-check(sentQuery.includes('[out:json]') && sentQuery.includes('(relation(177743);relation["route"="hiking"]["name"~"alta via.*(n\\\\.|nr\\\\.|n|nr)? ?1( |$|[^0-9])",i](') && sentQuery.endsWith('););out tags;>>;out geom;'), `query shape: ${sentQuery}`);
+check((await page.locator('#msg').innerText()).includes('"Alta Via 1" loaded from OpenStreetMap: 2 ways, 5 points'), 'way and point counts reported');
+check(opHosts.join(',') === 'overpass-api.de,overpass.kumi.systems', `main server 504 -> mirror used (${opHosts.join(',')})`);
+check(sentQuery === '[out:json][timeout:60];relation(177743);>>;way._;out geom;', `light query by id: ${sentQuery}`);
+check(await page.locator('#btn-route-gpx').isVisible(), 'save-route-GPX button shown');
+const rg = await page.evaluate(() => window.__hike.routeGpx());
+check((rg.match(/<trkseg>/g) || []).length === 2 && (rg.match(/<trkpt /g) || []).length === 5 && rg.includes('<name>Alta Via 1</name>'), 'route GPX: one segment per way, all points');
 // a relation that carries its members' geometry itself, plus the same way as a separate element: no duplicates
 const po = await page.evaluate(() => window.__hike.parseOverpass({ elements: [
   { type: 'relation', id: 177743, tags: { name: 'Alta via n. 1 delle Dolomiti' }, members: [
@@ -222,11 +228,23 @@ check(po.name === 'Alta via n. 1 delle Dolomiti' && po.segs.length === 2, `membe
 check((await lines('ref-route')) === 2, '2 reference segments from the ways');
 check((await page.locator('#stats').innerText()).includes('4 off route'), 'off-route recomputed against the fetched route');
 await page.unroute('**/api/interpreter');
-await page.route('**/api/interpreter', r => r.fulfill({ status: 504, body: 'busy' }));
+opHosts.length = 0;
+await page.route('**/api/interpreter', r => { opHosts.push(new URL(r.request().url()).host); r.fulfill({ status: 504, body: 'busy' }); });
 await page.click('#btn-clear-route');
 await page.click('#btn-osm');
 await page.waitForFunction(() => document.getElementById('msg').textContent.includes('failed'));
-check((await page.locator('#msg').innerText()).includes('Overpass answered 504'), 'Overpass failure reported, page still usable');
+check((await page.locator('#msg').innerText()).includes('overpass.private.coffee answered 504') && opHosts.length === 3, `all three servers tried, last failure named (${opHosts.join(',')})`);
+// by-id answer with no ways (relation gone): the name search runs as fallback
+await page.unroute('**/api/interpreter');
+const opQueries = [];
+await page.route('**/api/interpreter', async r => {
+  const q = decodeURIComponent(r.request().postData().replace(/^data=/, '')); opQueries.push(q);
+  const els = q.includes('relation(177743)') ? [] : [{ type: 'way', id: 5, geometry: [{ lat: 46.5, lon: 12 }, { lat: 46.51, lon: 12 }] }];
+  await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ elements: els }) });
+});
+await page.click('#btn-osm');
+await page.waitForFunction(() => /loaded from OpenStreetMap|failed/.test(document.getElementById('msg').textContent));
+check(opQueries.length === 2 && opQueries[1].includes('["name"~"alta via') && (await page.locator('#msg').innerText()).includes('1 ways, 2 points'), 'empty by-id answer falls back to the name search');
 check(await page.locator('#btn-osm').isEnabled(), 'button re-enabled after failure');
 await page.unroute('**/api/interpreter');
 
