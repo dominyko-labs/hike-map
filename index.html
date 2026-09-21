@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Hike Map</title>
+<meta name="description" content="Draws the path and photo pins of a hike from the GPS metadata of your photos.">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<style>
+  :root {
+    --bg: #f6f5f2;
+    --panel: #ffffff;
+    --ink: #1c1b18;
+    --muted: #6b6860;
+    --line: #e2dfd8;
+    --accent: #1f6f5b;
+    --accent-ink: #ffffff;
+    --start: #2e8b57;
+    --end: #c0392b;
+    --danger: #a33;
+    --shadow: 0 -6px 24px rgba(0,0,0,.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #141413; --panel: #1f1e1c; --ink: #ecebe6; --muted: #a29e94;
+      --line: #35332f; --accent: #5fc4a5; --accent-ink: #0f1f1a;
+      --start: #5fd08a; --end: #ff7b6b; --danger: #ff8a80;
+      --shadow: 0 -6px 24px rgba(0,0,0,.5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #141413; --panel: #1f1e1c; --ink: #ecebe6; --muted: #a29e94;
+    --line: #35332f; --accent: #5fc4a5; --accent-ink: #0f1f1a;
+    --start: #5fd08a; --end: #ff7b6b; --danger: #ff8a80;
+    --shadow: 0 -6px 24px rgba(0,0,0,.5);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  #map { flex: 1 1 auto; min-height: 40vh; background: var(--bg); }
+  #panel {
+    flex: 0 0 auto; background: var(--panel); box-shadow: var(--shadow);
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--line);
+  }
+  h1 { font-size: 17px; margin: 0 0 6px; font-weight: 600; }
+  .stats { display: flex; gap: 16px; flex-wrap: wrap; margin: 0 0 10px; color: var(--muted); font-size: 14px; }
+  .stats b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button, label.btn {
+    appearance: none; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    border-radius: 10px; padding: 9px 14px; font: inherit; font-size: 15px; cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  label.btn input { display: none; }
+  #empty { color: var(--muted); font-size: 14px; }
+  #empty p { margin: 6px 0; }
+  #empty code { font-size: 13px; }
+  #msg { color: var(--danger); font-size: 14px; margin: 6px 0 0; min-height: 1.2em; }
+  .hidden { display: none !important; }
+  .leaflet-container { font: inherit; }
+  .leaflet-popup-content { margin: 10px 12px; font-size: 14px; }
+</style>
+</head>
+<body>
+<div id="map" role="application" aria-label="Map of the hike"></div>
+<section id="panel">
+  <h1 id="title">Hike Map</h1>
+  <div id="stats" class="stats hidden">
+    <span><b id="s-count">0</b> photos</span>
+    <span><b id="s-dist">0</b> km</span>
+    <span><b id="s-dur">0:00</b> h</span>
+    <span id="s-skipped-wrap" class="hidden"><b id="s-skipped">0</b> without GPS</span>
+  </div>
+  <div id="empty">
+    <p>Run the <b>Hike map</b> Shortcut on your photos and it opens this page with your route.</p>
+    <p>Or pick JPEG photos saved to Files with location kept on:</p>
+  </div>
+  <div class="row">
+    <button id="btn-gpx" class="primary hidden" type="button">Download GPX</button>
+    <button id="btn-copy" class="hidden" type="button">Copy link</button>
+    <label class="btn">Pick photos<input id="files" type="file" accept="image/jpeg,.jpg,.jpeg" multiple></label>
+  </div>
+  <p id="msg" role="status" aria-live="polite"></p>
+</section>
+
+<script src="vendor/leaflet/leaflet.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // ---------- state ----------
+  var points = [];      // {lat, lon, t (ms or NaN), label}
+  var skipped = 0;
+  var name = '';
+  var map, layer;
+
+  // ---------- parsing ----------
+  function parseTime(s) {
+    if (s === undefined || s === '') return NaN;
+    if (/^\d+$/.test(s)) { var n = Number(s); return n > 1e11 ? n : n * 1000; }
+    var ms = Date.parse(s);
+    return isNaN(ms) ? NaN : ms;
+  }
+
+  // "lat,lon,time;lat,lon,time" -> points. Bad entries are counted, not fatal.
+  function parsePointList(str) {
+    var out = [], bad = 0;
+    str.split(/[;\n]+/).forEach(function (entry) {
+      entry = entry.trim();
+      if (!entry) return;
+      var f = entry.split(',');
+      var lat = parseFloat(f[0]), lon = parseFloat(f[1]);
+      if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) { bad++; return; }
+      out.push({ lat: lat, lon: lon, t: parseTime(f.slice(2).join(',')) });
+    });
+    return { points: out, bad: bad };
+  }
+
+  function parseHash(hash) {
+    var h = hash.replace(/^#/, '');
+    if (!h) return null;
+    var params = {};
+    if (h.indexOf('=') === -1) { params.p = h; }
+    else h.split('&').forEach(function (kv) {
+      var i = kv.indexOf('=');
+      var k = i < 0 ? kv : kv.slice(0, i), v = i < 0 ? '' : kv.slice(i + 1);
+      try { v = decodeURIComponent(v.replace(/\+/g, ' ')); } catch (e) { /* keep raw */ }
+      params[k] = v;
+    });
+    return params;
+  }
+
+  // ---------- geometry ----------
+  function haversineKm(a, b) {
+    var R = 6371.0088, toRad = Math.PI / 180;
+    var dLat = (b.lat - a.lat) * toRad, dLon = (b.lon - a.lon) * toRad;
+    var s = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(a.lat * toRad) * Math.cos(b.lat * toRad) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    return 2 * R * Math.asin(Math.sqrt(s));
+  }
+  function totalKm(pts) {
+    var d = 0;
+    for (var i = 1; i < pts.length; i++) d += haversineKm(pts[i - 1], pts[i]);
+    return d;
+  }
+  function sortByTime(pts) {
+    return pts.map(function (p, i) { return { p: p, i: i }; })
+      .sort(function (a, b) {
+        var ta = isNaN(a.p.t) ? Infinity : a.p.t, tb = isNaN(b.p.t) ? Infinity : b.p.t;
+        return ta === tb ? a.i - b.i : ta - tb;
+      })
+      .map(function (x) { return x.p; });
+  }
+
+  // ---------- formatting ----------
+  function fmtTime(t) {
+    if (isNaN(t)) return 'no time';
+    var d = new Date(t);
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' +
+           d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  }
+  function fmtDuration(ms) {
+    if (!isFinite(ms) || ms < 0) return '–';
+    var m = Math.round(ms / 60000);
+    return Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0');
+  }
+  function pad(n) { return String(n).padStart(2, '0'); }
+  function isoUTC(t) { return new Date(t).toISOString().replace(/\.\d{3}Z$/, 'Z'); }
+  function esc(s) { return String(s).replace(/[<>&"]/g, function (c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]; }); }
+
+  // ---------- GPX ----------
+  function gpx() {
+    var pts = sortByTime(points);
+    var n = esc(name || 'Hike');
+    var lines = ['<?xml version="1.0" encoding="UTF-8"?>',
+      '<gpx version="1.1" creator="hike-map" xmlns="http://www.topografix.com/GPX/1/1">',
+      '  <metadata><name>' + n + '</name></metadata>'];
+    pts.forEach(function (p, i) {
+      lines.push('  <wpt lat="' + p.lat + '" lon="' + p.lon + '">' +
+        (isNaN(p.t) ? '' : '<time>' + isoUTC(p.t) + '</time>') +
+        '<name>Photo ' + (i + 1) + '</name></wpt>');
+    });
+    lines.push('  <trk><name>' + n + '</name><trkseg>');
+    pts.forEach(function (p) {
+      lines.push('    <trkpt lat="' + p.lat + '" lon="' + p.lon + '">' +
+        (isNaN(p.t) ? '' : '<time>' + isoUTC(p.t) + '</time>') + '</trkpt>');
+    });
+    lines.push('  </trkseg></trk>', '</gpx>', '');
+    return lines.join('\n');
+  }
+
+  function shareLink() {
+    var p = sortByTime(points).map(function (p) {
+      return p.lat + ',' + p.lon + (isNaN(p.t) ? '' : ',' + Math.round(p.t / 1000));
+    }).join(';');
+    var h = '#p=' + p + (skipped ? '&s=' + skipped : '') + (name ? '&n=' + encodeURIComponent(name) : '');
+    return location.origin + location.pathname + h;
+  }
+
+  // ---------- EXIF (JPEG only) for the file-picker fallback ----------
+  function exifGps(buf) {
+    var dv = new DataView(buf);
+    if (dv.byteLength < 4 || dv.getUint16(0) !== 0xFFD8) return null;
+    var off = 2;
+    while (off + 4 <= dv.byteLength) {
+      if (dv.getUint8(off) !== 0xFF) return null;
+      var marker = dv.getUint8(off + 1);
+      if (marker === 0xD9 || marker === 0xDA) return null;          // EOI or start of scan: no APP1 found
+      var len = dv.getUint16(off + 2);
+      if (marker === 0xE1 && off + 10 <= dv.byteLength &&
+          dv.getUint32(off + 4) === 0x45786966 && dv.getUint16(off + 8) === 0) { // "Exif\0\0"
+        return parseTiff(dv, off + 10, len - 8);
+      }
+      off += 2 + len;
+    }
+    return null;
+  }
+  function parseTiff(dv, base, size) {
+    var end = Math.min(dv.byteLength, base + size);
+    var le = dv.getUint16(base) === 0x4949;
+    var u16 = function (o) { return dv.getUint16(base + o, le); };
+    var u32 = function (o) { return dv.getUint32(base + o, le); };
+    if (u16(2) !== 42) return null;
+    var readIfd = function (ifd) {
+      var entries = {}, n = u16(ifd);
+      for (var i = 0; i < n; i++) {
+        var e = ifd + 2 + i * 12;
+        if (base + e + 12 > end) break;
+        entries[u16(e)] = { type: u16(e + 2), count: u32(e + 4), at: e + 8 };
+      }
+      return entries;
+    };
+    var ascii = function (f) {
+      var o = f.count <= 4 ? f.at : u32(f.at), s = '';
+      for (var i = 0; i < f.count && base + o + i < end; i++) { var c = dv.getUint8(base + o + i); if (c) s += String.fromCharCode(c); }
+      return s;
+    };
+    var rationals = function (f) {
+      var o = u32(f.at), out = [];
+      for (var i = 0; i < f.count; i++) { var num = u32(o + i * 8), den = u32(o + i * 8 + 4); out.push(den ? num / den : 0); }
+      return out;
+    };
+    var dms = function (r) { return (r[0] || 0) + (r[1] || 0) / 60 + (r[2] || 0) / 3600; };
+
+    var ifd0 = readIfd(u32(4));
+    var res = { lat: NaN, lon: NaN, t: NaN };
+    if (ifd0[0x8825]) {
+      var g = readIfd(u32(ifd0[0x8825].at));
+      if (g[2] && g[4]) {
+        res.lat = dms(rationals(g[2])) * (g[1] && ascii(g[1]) === 'S' ? -1 : 1);
+        res.lon = dms(rationals(g[4])) * (g[3] && ascii(g[3]) === 'W' ? -1 : 1);
+      }
+    }
+    if (ifd0[0x8769]) {
+      var x = readIfd(u32(ifd0[0x8769].at));
+      var dt = x[0x9003] ? ascii(x[0x9003]) : (x[0x9004] ? ascii(x[0x9004]) : '');
+      var m = /^(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)/.exec(dt);
+      if (m) res.t = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
+    }
+    return isFinite(res.lat) && isFinite(res.lon) ? res : null;
+  }
+
+  // ---------- rendering ----------
+  function $(id) { return document.getElementById(id); }
+  function setMsg(s) { $('msg').textContent = s || ''; }
+
+  function initMap() {
+    map = L.map('map', { zoomControl: true });
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }).addTo(map);
+    map.setView([46.8, 8.2], 5);
+    layer = L.layerGroup().addTo(map);
+  }
+
+  function render() {
+    layer.clearLayers();
+    var has = points.length > 0;
+    $('stats').classList.toggle('hidden', !has);
+    $('empty').classList.toggle('hidden', has);
+    $('btn-gpx').classList.toggle('hidden', !has);
+    $('btn-copy').classList.toggle('hidden', !has);
+    $('title').textContent = name || 'Hike Map';
+    document.title = (name ? name + ' · ' : '') + 'Hike Map';
+    if (!has) return;
+
+    var pts = sortByTime(points);
+    var latlngs = pts.map(function (p) { return [p.lat, p.lon]; });
+    L.polyline(latlngs, { color: css('--accent'), weight: 4, opacity: .9 }).addTo(layer);
+    pts.forEach(function (p, i) {
+      var color = i === 0 ? css('--start') : i === pts.length - 1 ? css('--end') : css('--accent');
+      L.circleMarker([p.lat, p.lon], { radius: 7, color: '#fff', weight: 2, fillColor: color, fillOpacity: 1 })
+        .bindPopup('<b>Photo ' + (i + 1) + ' of ' + pts.length + '</b><br>' + fmtTime(p.t) +
+                   '<br><small>' + p.lat.toFixed(5) + ', ' + p.lon.toFixed(5) + '</small>')
+        .addTo(layer);
+    });
+    map.fitBounds(L.latLngBounds(latlngs).pad(0.15), { maxZoom: 16 });
+
+    var timed = pts.filter(function (p) { return !isNaN(p.t); });
+    $('s-count').textContent = pts.length;
+    $('s-dist').textContent = totalKm(pts).toFixed(2);
+    $('s-dur').textContent = timed.length >= 2 ? fmtDuration(timed[timed.length - 1].t - timed[0].t) : '–';
+    $('s-skipped').textContent = skipped;
+    $('s-skipped-wrap').classList.toggle('hidden', !skipped);
+  }
+  function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+  function loadFromHash() {
+    var params = parseHash(location.hash);
+    points = []; skipped = 0; name = '';
+    setMsg('');
+    if (params) {
+      var r = parsePointList(params.p || '');
+      points = r.points;
+      skipped = parseInt(params.s, 10) || 0;
+      name = (params.n || '').slice(0, 80);
+      if (!points.length) setMsg('No usable points in the link. Expected #p=lat,lon,time;lat,lon,time');
+      else if (r.bad) setMsg(r.bad + ' entr' + (r.bad === 1 ? 'y' : 'ies') + ' in the link could not be read.');
+    }
+    render();
+  }
+
+  function download(text, filename, type) {
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: type }));
+    a.download = filename;
+    document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  }
+
+  function onFiles(fileList) {
+    var files = Array.prototype.slice.call(fileList);
+    if (!files.length) return;
+    setMsg('Reading ' + files.length + ' photo' + (files.length === 1 ? '' : 's') + '…');
+    var added = 0, none = 0, done = 0;
+    files.forEach(function (f) {
+      var r = new FileReader();
+      r.onload = function () {
+        var g = null;
+        try { g = exifGps(r.result); } catch (e) { g = null; }
+        if (g) { points.push(g); added++; } else { none++; }
+        finish();
+      };
+      r.onerror = function () { none++; finish(); };
+      r.readAsArrayBuffer(f.slice(0, 512 * 1024));
+    });
+    function finish() {
+      if (++done < files.length) return;
+      skipped += none;
+      render();
+      setMsg(added + ' added' + (none ? ', ' + none + ' without GPS (iOS strips location from photos picked from the library; save them to Files first)' : '') + '.');
+      if (points.length) history.replaceState(null, '', shareLink());
+    }
+  }
+
+  // ---------- wiring ----------
+  initMap();
+  loadFromHash();
+  window.addEventListener('hashchange', loadFromHash);
+  $('btn-gpx').addEventListener('click', function () {
+    download(gpx(), (name || 'hike').replace(/[^\w.-]+/g, '_') + '.gpx', 'application/gpx+xml');
+  });
+  $('btn-copy').addEventListener('click', function () {
+    var url = shareLink();
+    var ok = function () { setMsg('Link copied.'); }, fail = function () { window.prompt('Copy this link', url); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(ok, fail); else fail();
+  });
+  $('files').addEventListener('change', function (e) { onFiles(e.target.files); e.target.value = ''; });
+
+  // Exposed for the test-suite only.
+  window.__hike = {
+    points: function () { return sortByTime(points); },
+    gpx: gpx, shareLink: shareLink, totalKm: totalKm, parsePointList: parsePointList, exifGps: exifGps
+  };
+})();
+</script>
+</body>
+</html>
