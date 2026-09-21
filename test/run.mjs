@@ -294,6 +294,69 @@ check(isNaN(ent.points[2].t) && ent.points[3].t === 1789902000000, 'empty time a
 const legacy = await page.evaluate(() => window.__hike.parsePointList('46.52,12.00,2026-09-20T08:00:00;46.55,12.01'));
 check(legacy.points.length === 2 && legacy.points[1].lon === 12.01, 'comma form still parses');
 
+// ---- 10. trails + elevation via mocked BRouter ----
+console.log('10. trails + elevation (mocked BRouter)');
+const ELE = [1000, 1005, 1003, 1020, 1015, 1050, 1049, 1030];      // hysteresis 8 m: up 50, down 20
+const eg = await page.evaluate(e => window.__hike.elevationGain(e.map(x => [0, 0, x])), ELE);
+check(eg.up === 50 && eg.down === 20, `elevation gain with hysteresis: up ${eg.up} down ${eg.down}`);
+const dw = await page.evaluate(() => window.__hike.dayWaypoints([{ lat: 46.5, lon: 12 }, { lat: 46.50005, lon: 12 }, { lat: 46.51, lon: 12 }]).length);
+check(dw === 2, `waypoints within 40 m collapse (got ${dw})`);
+const brReqs = [];
+let failMode = 'first-profile';        // first request: hiking-mountain fails, trekking succeeds
+await page.route('**/brouter?*', async r => {
+  const u = new URL(r.request().url());
+  const profile = u.searchParams.get('profile'), lonlats = u.searchParams.get('lonlats').split('|');
+  brReqs.push({ profile, n: lonlats.length });
+  if (failMode === 'all' || (failMode === 'first-profile' && brReqs.length === 1 && profile === 'hiking-mountain')) {
+    await r.fulfill({ status: 500, body: 'no way' }); return;
+  }
+  // 8 coordinates spread from the first to the last waypoint, with the ELE profile
+  const [lon0, lat0] = lonlats[0].split(',').map(Number), [lon1, lat1] = lonlats[lonlats.length - 1].split(',').map(Number);
+  const coords = ELE.map((e, i) => [lon0 + (lon1 - lon0) * i / 7, lat0 + (lat1 - lat0) * i / 7, e]);
+  await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: { 'track-length': '1234' }, geometry: { type: 'LineString', coordinates: coords } }] }) });
+});
+await page.goto(base + hash); await ready();
+check(await page.locator('#btn-trails').isVisible() && (await page.locator('#btn-trails').innerText()) === 'Trails + elevation', 'trails button offered');
+await page.click('#btn-trails');
+await page.waitForFunction(() => document.getElementById('msg').textContent.includes('days on trails'));
+check((await page.locator('#msg').innerText()) === '2 of 2 days on trails with elevation.', `message: ${await page.locator('#msg').innerText()}`);
+check(brReqs.map(r => r.profile).join(',') === 'hiking-mountain,trekking,hiking-mountain', `profile fallback then normal: ${brReqs.map(r => r.profile).join(',')}`);
+check((await lines('routed')) === 2 && (await lines('straight')) === 1, `2 routed lines, 1 straight (single-photo day)`);
+const tdays = await page.evaluate(() => window.__hike.days());
+check(tdays[0].trail && tdays[0].trail.n === 8 && tdays[0].trail.up === 50 && tdays[0].trail.down === 20, 'day 1 trail: 8 vertices, up 50, down 20');
+const expKm = pathKm(ELE.map((e, i) => [46.52 + (46.55 - 46.52) * i / 7, 12 + (12.01 - 12) * i / 7]));
+check(near(tdays[0].km, expKm, 1e-9) && near(tdays[0].trail.km, expKm, 1e-9), `day distance now from the routed line (${expKm.toFixed(3)} km)`);
+check((await page.locator('#days li').nth(0).innerText()).includes('↑ 50 m ↓ 20 m'), 'day row shows ascent and descent');
+check((await page.locator('#stats').innerText()).includes('↑ 100 m'), 'total ascent in stats');
+check((await page.locator('#btn-trails').innerText()) === 'Trails ✓', 'button shows done');
+const g2 = await page.evaluate(() => window.__hike.gpx());
+check((g2.match(/<ele>/g) || []).length === 16 && g2.includes('on trails'), 'GPX carries routed points with elevation');
+const before = brReqs.length;
+await page.reload(); await ready();
+await page.waitForSelector('path.routed', { state: 'attached' });
+check((await lines('routed')) === 2 && brReqs.length === before, 'routed lines restored from cache on reload, no new requests');
+// chunking: one day with 45 waypoints spaced ~111 m -> 2 requests of 40 and 6, joined into 15 vertices
+const wps45 = Array.from({ length: 45 }, (_, i) => `${(46.7 + i * 0.001).toFixed(4)},12.5,2026-09-25T${String(8 + Math.floor(i / 6)).padStart(2, '0')}:${String((i % 6) * 10).padStart(2, '0')}:00`);
+await page.goto(base + '#p=' + wps45.join(';')); await ready();
+brReqs.length = 0; failMode = 'none';
+await page.click('#btn-trails');
+await page.waitForFunction(() => document.getElementById('msg').textContent.includes('days on trails'));
+check(brReqs.length === 2 && brReqs[0].n === 40 && brReqs[1].n === 6, `45 waypoints sent as 40 + 6 (got ${brReqs.map(r => r.n).join('+')})`);
+const t45 = await page.evaluate(() => window.__hike.days()[0].trail);
+// the mock restarts its profile at 1000 m in the second chunk, so the joined profile is
+// 1000..1030 then 1005..1030: up 50+15+30, down 20+25+20
+check(t45 && t45.n === 15 && t45.up === 95 && t45.down === 65, `chunks joined: ${t45 && t45.n} vertices, up ${t45 && t45.up}, down ${t45 && t45.down}`);
+// total failure: straight line stays, message says which day
+await page.goto(base + '#p=46.8,12.6,2026-09-26T08:00:00;46.81,12.61,2026-09-26T09:00:00'); await ready();
+failMode = 'all'; brReqs.length = 0;
+await page.click('#btn-trails');
+await page.waitForFunction(() => document.getElementById('msg').textContent.includes('days on trails'));
+const fm = await page.locator('#msg').innerText();
+check(fm.startsWith('0 of 1 days on trails') && fm.includes('Not routed: day 1 (trekking: 500'), `failure reported: ${fm}`);
+check((await lines('straight')) === 1 && (await lines('routed')) === 0 && brReqs.length === 2, 'straight line kept, both profiles tried');
+check(await page.locator('#btn-trails').isEnabled(), 'button re-enabled after failure');
+await page.unroute('**/brouter?*');
+
 // ---- 9. tiles toggle and layout ----
 console.log('9. tiles and layout');
 await page.click('#btn-tiles');

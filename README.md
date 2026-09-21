@@ -53,7 +53,21 @@ browser. It reads a few hundred KB per photo, shows "Reading N of M" as it goes 
 * **Tiles.** Street tiles from OpenStreetMap, or **Topo tiles** from
   OpenTopoMap with contour lines, huts and marked trails. The choice is
   remembered on the device.
-* **Download GPX** saves one track per day plus a waypoint per photo.
+* **Trails + elevation.** Photos are only where you stopped, so the plain
+  line between them cuts corners. This button sends each day's photo
+  positions, in order, to [BRouter](https://brouter.de) (a free
+  OpenStreetMap-based router, `hiking-mountain` profile, falling back to
+  `trekking`) and draws the trail it finds through them, with the altitude of
+  every vertex. Each day then shows its trail distance and **↑ ascent ↓
+  descent** (an 8 m hysteresis filters out elevation noise), and the stats line
+  sums the ascent. Results are cached on the device per set of photo
+  positions, so it runs once. Up to 40 positions go in one request; longer
+  days are split and joined. A photo taken off any mapped path makes the
+  router detour to the nearest trail and back, so the line between two photos
+  is the router's guess along trails, not a GPS track. Days that could not be
+  routed keep their straight line and are named in the message.
+* **Download GPX** saves one track per day, on the routed trail with
+  elevation where available, plus a waypoint per photo.
 
 ## Optional: the Shortcut
 
@@ -166,14 +180,16 @@ The test serves the page locally, loads it in headless Chromium through
 Playwright, and checks parsing of every link form, time-sorting, day grouping,
 distance sums against an independent haversine, GPX output, route loading from
 a file, from `routes/` and from a mocked Overpass response (including the
-failure path), off-route detection, persistence across reloads, the empty and
-malformed states, and the JPEG and HEIC Exif readers against fixtures it builds
+failure path), off-route detection, trail routing against a mocked BRouter (profile
+fallback, request chunking, elevation gain, caching, failure), persistence
+across reloads, the empty and malformed states, and the JPEG and HEIC Exif readers against fixtures it builds
 byte by byte, including a HEIC whose Exif sits past the first megabyte. It
 resolves Playwright from the global npm root if it is not installed locally.
 
 Map tiles come from `tile.openstreetmap.org` and `opentopomap.org` at view time
 under their usage policies; fine for personal use. Route data fetched from
-Overpass is © OpenStreetMap contributors, ODbL.
+Overpass and trails from BRouter are © OpenStreetMap contributors, ODbL; BRouter's
+elevation comes from public SRTM data.
 
 ## Hosting
 

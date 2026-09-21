@@ -53,7 +53,8 @@
   #days li:first-child { border-top: 0; }
   #days .sw { width: 12px; height: 12px; border-radius: 50%; flex: 0 0 auto; }
   #days .d { flex: 1 1 auto; }
-  #days .m { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #days .m { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+  #days .m small { display: block; font-size: 12px; }
   #empty { color: var(--muted); font-size: 14px; }
   #empty p { margin: 6px 0; }
   #msg { color: var(--muted); font-size: 14px; margin: 8px 0 0; min-height: 1.2em; }
@@ -74,6 +75,7 @@
     <span><b id="s-dist">0</b> km</span>
     <span id="s-skipped-wrap" class="hidden"><b id="s-skipped">0</b> without GPS</span>
     <span id="s-off-wrap" class="hidden"><b id="s-off">0</b> off route</span>
+    <span id="s-up-wrap" class="hidden">↑ <b id="s-up">0</b> m</span>
   </div>
   <ul id="days" class="hidden"></ul>
   <div id="empty">
@@ -81,7 +83,8 @@
     <p>Add the official route (a GPX file, or fetch Alta Via 1 from OpenStreetMap) to see where you took your own way.</p>
   </div>
   <div class="row">
-    <button id="btn-gpx" class="primary hidden" type="button">Download GPX</button>
+    <button id="btn-trails" class="primary hidden" type="button">Trails + elevation</button>
+    <button id="btn-gpx" class="hidden" type="button">Download GPX</button>
     <button id="btn-copy" class="hidden" type="button">Copy link</button>
     <label class="btn">Pick photos<input id="files" type="file" accept="image/*,.heic,.heif,.jpg,.jpeg" multiple></label>
   </div>
@@ -105,6 +108,10 @@
   var DOLOMITES = [46.45, 12.05];
   var DAY_COLORS = ['#2a9d8f', '#e76f51', '#8e7cc3', '#d64f8a', '#3d8fd1', '#c9a227', '#26a69a', '#a0522d', '#5c6bc0', '#7cb342'];
   var STORE_KEY = 'hike-map.route.v1';
+  var TRAILS_KEY = 'hike-map.trails.v1';
+  var BROUTER = 'https://brouter.de/brouter';
+  var PROFILES = ['hiking-mountain', 'trekking'];     // tried in order
+  var WP_MIN_M = 40, WP_PER_REQUEST = 40, ELE_HYST_M = 8;
 
   // ---------- state ----------
   var points = [];      // {lat, lon, t}
@@ -113,6 +120,8 @@
   var route = null;     // {name, segs: [[{lat,lon},...], ...]}
   var map, layer, refLayer, osmTiles, topoTiles, useTopo = false;
   var dayGroups = [];
+  var trails = {};      // waypoint-hash -> {coords: [[lat, lon, ele], ...], km, up, down}
+  var routing = false;
 
   // ---------- parsing ----------
   function parseTime(s) {
@@ -236,6 +245,32 @@
     });
     return Math.sqrt(best) * 1000;
   }
+  // Waypoints for the router: the day's photos in order, dropping any within WP_MIN_M of the previous.
+  function dayWaypoints(pts) {
+    var out = [];
+    pts.forEach(function (p) {
+      if (!out.length || haversineKm(out[out.length - 1], p) * 1000 >= WP_MIN_M) out.push({ lat: p.lat, lon: p.lon });
+    });
+    return out;
+  }
+  function wpHash(wps) { return wps.map(function (p) { return p.lat.toFixed(5) + ',' + p.lon.toFixed(5); }).join('|'); }
+  // Ascent and descent with hysteresis: a move only counts once it exceeds ELE_HYST_M from the last counted level.
+  function elevationGain(coords) {
+    var up = 0, down = 0, base = null;
+    coords.forEach(function (c) {
+      var e = c[2];
+      if (typeof e !== 'number' || !isFinite(e)) return;
+      if (base === null) { base = e; return; }
+      if (e - base >= ELE_HYST_M) { up += e - base; base = e; }
+      else if (base - e >= ELE_HYST_M) { down += base - e; base = e; }
+    });
+    return { up: Math.round(up), down: Math.round(down) };
+  }
+  function coordsKm(coords) {
+    var d = 0;
+    for (var i = 1; i < coords.length; i++) d += haversineKm({ lat: coords[i - 1][0], lon: coords[i - 1][1] }, { lat: coords[i][0], lon: coords[i][1] });
+    return d;
+  }
   function dayKey(t) {
     if (isNaN(t)) return 'undated';
     var d = new Date(t);
@@ -250,7 +285,9 @@
     });
     groups.forEach(function (g, i) {
       g.color = DAY_COLORS[i % DAY_COLORS.length];
-      g.km = totalKm(g.pts);
+      g.wps = dayWaypoints(g.pts);
+      g.trail = trails[wpHash(g.wps)] || null;
+      g.km = g.trail ? g.trail.km : totalKm(g.pts);
       var timed = g.pts.filter(function (p) { return !isNaN(p.t); });
       g.dur = timed.length >= 2 ? timed[timed.length - 1].t - timed[0].t : NaN;
     });
@@ -292,11 +329,17 @@
       });
     });
     groups.forEach(function (g, i) {
-      lines.push('  <trk><name>' + n + ' day ' + (i + 1) + (g.key === 'undated' ? '' : ' (' + g.key + ')') + '</name><trkseg>');
-      g.pts.forEach(function (p) {
-        lines.push('    <trkpt lat="' + p.lat + '" lon="' + p.lon + '">' +
-          (isNaN(p.t) ? '' : '<time>' + isoUTC(p.t) + '</time>') + '</trkpt>');
-      });
+      lines.push('  <trk><name>' + n + ' day ' + (i + 1) + (g.key === 'undated' ? '' : ' (' + g.key + ')') + (g.trail ? ', on trails' : '') + '</name><trkseg>');
+      if (g.trail) {
+        g.trail.coords.forEach(function (c) {
+          lines.push('    <trkpt lat="' + c[0] + '" lon="' + c[1] + '">' + (isFinite(c[2]) ? '<ele>' + c[2] + '</ele>' : '') + '</trkpt>');
+        });
+      } else {
+        g.pts.forEach(function (p) {
+          lines.push('    <trkpt lat="' + p.lat + '" lon="' + p.lon + '">' +
+            (isNaN(p.t) ? '' : '<time>' + isoUTC(p.t) + '</time>') + '</trkpt>');
+        });
+      }
       lines.push('  </trkseg></trk>');
     });
     lines.push('</gpx>', '');
@@ -519,10 +562,16 @@
 
     var sorted = sortByTime(points);
     dayGroups = groupByDay(sorted);
-    var off = 0, k = 0;
+    var off = 0, k = 0, upTotal = 0, anyTrail = false;
     dayGroups.forEach(function (g, gi) {
-      L.polyline(g.pts.map(function (p) { return [p.lat, p.lon]; }),
-        { color: g.color, weight: 4, opacity: .9, className: 'day-line' }).addTo(layer);
+      if (g.trail) {
+        anyTrail = true; upTotal += g.trail.up;
+        L.polyline(g.trail.coords.map(function (c) { return [c[0], c[1]]; }),
+          { color: g.color, weight: 4, opacity: .9, className: 'day-line routed' }).addTo(layer);
+      } else {
+        L.polyline(g.pts.map(function (p) { return [p.lat, p.lon]; }),
+          { color: g.color, weight: 4, opacity: .9, className: 'day-line straight' }).addTo(layer);
+      }
       g.pts.forEach(function (p, i) {
         k++;
         var first = gi === 0 && i === 0, last = gi === dayGroups.length - 1 && i === g.pts.length - 1;
@@ -546,6 +595,10 @@
     $('s-skipped-wrap').classList.toggle('hidden', !skipped);
     $('s-off').textContent = off;
     $('s-off-wrap').classList.toggle('hidden', !route);
+    $('s-up').textContent = upTotal;
+    $('s-up-wrap').classList.toggle('hidden', !anyTrail);
+    $('btn-trails').classList.toggle('hidden', !has);
+    $('btn-trails').textContent = dayGroups.every(function (g) { return g.trail || g.wps.length < 2; }) ? 'Trails ✓' : 'Trails + elevation';
 
     var ul = $('days');
     ul.innerHTML = '';
@@ -553,7 +606,8 @@
       var li = document.createElement('li');
       li.innerHTML = '<span class="sw" style="background:' + g.color + '"></span>' +
         '<span class="d">Day ' + (i + 1) + ' · ' + esc(fmtDay(g.key)) + '</span>' +
-        '<span class="m">' + g.pts.length + ' · ' + g.km.toFixed(1) + ' km · ' + fmtDuration(g.dur) + '</span>';
+        '<span class="m">' + g.pts.length + ' · ' + g.km.toFixed(1) + ' km · ' + fmtDuration(g.dur) +
+        (g.trail ? '<small>↑ ' + g.trail.up + ' m ↓ ' + g.trail.down + ' m</small>' : '') + '</span>';
       li.addEventListener('click', function () {
         map.fitBounds(L.latLngBounds(g.pts.map(function (p) { return [p.lat, p.lon]; })).pad(0.2), { maxZoom: 15 });
       });
@@ -617,6 +671,74 @@
       .then(function () { $('btn-osm').disabled = false; });
   }
 
+  // ---------- trails: route each day's photos along hiking paths with BRouter ----------
+  function restoreTrails() {
+    try { var s = localStorage.getItem(TRAILS_KEY); if (s) trails = JSON.parse(s) || {}; } catch (e) { trails = {}; }
+  }
+  function saveTrails() {
+    try { localStorage.setItem(TRAILS_KEY, JSON.stringify(trails)); } catch (e) { /* full or blocked: the map still works */ }
+  }
+  function brouterUrl(wps, profile) {
+    return BROUTER + '?lonlats=' + wps.map(function (p) { return p.lon.toFixed(6) + ',' + p.lat.toFixed(6); }).join('|') +
+      '&profile=' + profile + '&alternativeidx=0&format=geojson';
+  }
+  // GeoJSON from BRouter -> [[lat, lon, ele], ...]
+  function parseBrouter(json) {
+    var f = json && json.features && json.features[0];
+    var c = f && f.geometry && f.geometry.coordinates;
+    if (!c || c.length < 2) throw new Error('no geometry in the routing answer');
+    return c.map(function (x) { return [x[1], x[0], typeof x[2] === 'number' ? x[2] : NaN]; });
+  }
+  function routeChunk(wps) {
+    var i = 0;
+    var next = function (lastErr) {
+      if (i >= PROFILES.length) throw lastErr || new Error('routing failed');
+      var profile = PROFILES[i++];
+      return fetch(brouterUrl(wps, profile)).then(function (res) {
+        if (!res.ok) return res.text().then(function (t) { throw new Error(profile + ': ' + res.status + ' ' + t.slice(0, 120)); });
+        return res.json();
+      }).then(parseBrouter).catch(function (e) { return next(e); });
+    };
+    return next(null);
+  }
+  function routeDay(g) {
+    var wps = g.wps;
+    if (wps.length < 2) return Promise.resolve(null);
+    var chunks = [];
+    for (var a = 0; a < wps.length - 1; a += WP_PER_REQUEST - 1) chunks.push(wps.slice(a, Math.min(wps.length, a + WP_PER_REQUEST)));
+    return chunks.reduce(function (chain, chunk) {
+      return chain.then(function (acc) {
+        return routeChunk(chunk).then(function (coords) { return acc.concat(acc.length ? coords.slice(1) : coords); });
+      });
+    }, Promise.resolve([])).then(function (coords) {
+      var gain = elevationGain(coords);
+      return { coords: coords, km: coordsKm(coords), up: gain.up, down: gain.down };
+    });
+  }
+  function routeAllDays() {
+    if (routing || !dayGroups.length) return;
+    routing = true;
+    $('btn-trails').disabled = true;
+    var todo = dayGroups.filter(function (g) { return !g.trail && g.wps.length >= 2; });
+    var done = 0, failed = [];
+    todo.reduce(function (chain, g) {
+      return chain.then(function () {
+        setMsg('Routing day ' + (dayGroups.indexOf(g) + 1) + ' of ' + dayGroups.length + ' along trails…');
+        return routeDay(g).then(function (t) {
+          if (t) { trails[wpHash(g.wps)] = t; saveTrails(); done++; render(); }
+        }).catch(function (e) { failed.push('day ' + (dayGroups.indexOf(g) + 1) + ' (' + e.message + ')'); });
+      });
+    }, Promise.resolve()).then(function () {
+      routing = false;
+      $('btn-trails').disabled = false;
+      render();
+      var n = dayGroups.filter(function (g) { return g.trail; }).length;
+      var routable = dayGroups.filter(function (g) { return g.wps.length >= 2; }).length;
+      setMsg(n + ' of ' + routable + ' days on trails with elevation' +
+        (failed.length ? '. Not routed: ' + failed.join('; ') : '') + '.', failed.length > 0);
+    });
+  }
+
   // ---------- photo input ----------
   function loadFromHash() {
     var params = parseHash(location.hash);
@@ -665,6 +787,7 @@
   // ---------- wiring ----------
   initMap();
   restoreRoute();
+  restoreTrails();
   renderRoute();
   loadFromHash();
   window.addEventListener('hashchange', loadFromHash);
@@ -681,11 +804,13 @@
   $('btn-osm').addEventListener('click', fetchAv1);
   $('btn-clear-route').addEventListener('click', function () { setRoute(null, true); setMsg('Route cleared.'); });
   $('btn-tiles').addEventListener('click', toggleTiles);
+  $('btn-trails').addEventListener('click', routeAllDays);
 
   // Exposed for the test-suite only.
   window.__hike = {
     points: function () { return sortByTime(points); },
-    days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, color: g.color }; }); },
+    days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, color: g.color, wps: g.wps.length, trail: g.trail ? { n: g.trail.coords.length, km: g.trail.km, up: g.trail.up, down: g.trail.down } : null }; }); },
+    elevationGain: elevationGain, dayWaypoints: dayWaypoints,
     route: function () { return route; },
     gpx: gpx, shareLink: shareLink, totalKm: totalKm, parsePointList: parsePointList, exifGps: exifGps,
     parseGpx: parseGpx, parseOverpass: parseOverpass, distToRouteM: distToRouteM, heifExifItem: heifExifItem, parseCoord: parseCoord
