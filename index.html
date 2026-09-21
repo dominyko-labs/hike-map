@@ -48,6 +48,12 @@
   }
   button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   label.btn input { display: none; }
+  #timeline { margin: 2px 0 8px; }
+  .tl-row { display: flex; align-items: center; gap: 10px; }
+  #btn-play { width: 40px; height: 36px; padding: 0; flex: 0 0 auto; font-size: 15px; }
+  #tl { flex: 1 1 auto; width: 100%; min-width: 0; accent-color: var(--accent); height: 28px; margin: 0; }
+  #tl-label { color: var(--muted); font-size: 13px; min-height: 1.2em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .walker { stroke: var(--panel); }
   #days { list-style: none; margin: 0 0 4px; padding: 0; font-size: 14px; }
   #days li { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); cursor: pointer; }
   #days li:first-child { border-top: 0; }
@@ -77,6 +83,13 @@
     <span id="s-skipped-wrap" class="hidden"><b id="s-skipped">0</b> without GPS</span>
     <span id="s-off-wrap" class="hidden"><b id="s-off">0</b> off route</span>
     <span id="s-up-wrap" class="hidden">↑ <b id="s-up">0</b> m</span>
+  </div>
+  <div id="timeline" class="hidden">
+    <div class="tl-row">
+      <button id="btn-play" type="button" aria-label="Play the walk">▶</button>
+      <input id="tl" type="range" min="0" max="10000" value="10000" step="1" aria-label="Walk timeline">
+    </div>
+    <div id="tl-label"></div>
   </div>
   <ul id="days" class="hidden"></ul>
   <div id="empty">
@@ -126,6 +139,8 @@
   var dayGroups = [];
   var trails = {};      // waypoint-hash -> {coords: [[lat, lon, ele], ...], km, up, down}
   var routing = false;
+  var progressLayer, dayLines = [], markerRefs = [], tlDays = [], tlTotal = 0, playing = false, playHandle = null;
+  var TL_MAX = 10000, DAY_PLAY_MS = 5000, MIN_DAY_MS = 60000;
 
   // ---------- parsing ----------
   function parseTime(s) {
@@ -199,14 +214,21 @@
     return { name: nm ? nm.textContent.trim().slice(0, 80) : 'route', segs: segs };
   }
 
-  // Overpass JSON (out geom) -> {name, segs}: every way with geometry becomes one segment.
+  // Overpass JSON (out geom) -> {name, segs}: every way with geometry becomes one segment, whether it
+  // arrives as its own element or as a relation member carrying geometry.
   function parseOverpass(json) {
-    var segs = [], nm = '';
+    var segs = [], nm = '', seen = {};
+    var addWay = function (id, geometry) {
+      if (!geometry || geometry.length < 2 || (id !== undefined && seen[id])) return;
+      if (id !== undefined) seen[id] = true;
+      segs.push(geometry.map(function (g) { return { lat: g.lat, lon: g.lon }; }));
+    };
     (json.elements || []).forEach(function (el) {
-      if (el.type === 'relation' && !nm && el.tags && el.tags.name) nm = el.tags.name;
-      if (el.type === 'way' && el.geometry && el.geometry.length > 1) {
-        segs.push(el.geometry.map(function (g) { return { lat: g.lat, lon: g.lon }; }));
+      if (el.type === 'relation') {
+        if (!nm && el.tags && el.tags.name) nm = el.tags.name;
+        (el.members || []).forEach(function (m) { if (m.type === 'way') addWay(m.ref, m.geometry); });
       }
+      if (el.type === 'way') addWay(el.id, el.geometry);
     });
     if (!segs.length) throw new Error('OpenStreetMap returned no route ways');
     return { name: nm || 'Alta Via 1', segs: segs };
@@ -530,6 +552,7 @@
     map.setView(DOLOMITES, 9);
     refLayer = L.layerGroup().addTo(map);
     layer = L.layerGroup().addTo(map);
+    progressLayer = L.layerGroup().addTo(map);
   }
   function toggleTiles() {
     map.removeLayer(useTopo ? topoTiles : osmTiles);
@@ -560,7 +583,8 @@
     $('title').textContent = name || 'Hike Map';
     document.title = (name ? name + ' · ' : '') + 'Hike Map';
     if (!has) {
-      dayGroups = [];
+      dayGroups = []; dayLines = []; markerRefs = [];
+      stopPlay(); progressLayer.clearLayers(); $('timeline').classList.add('hidden');
       if (route) { map.fitBounds(routeBounds().pad(0.1)); }
       return;
     }
@@ -568,15 +592,18 @@
     var sorted = sortByTime(points);
     dayGroups = groupByDay(sorted);
     var off = 0, k = 0, upTotal = 0, anyTrail = false;
+    dayLines = []; markerRefs = [];
     dayGroups.forEach(function (g, gi) {
+      var line;
       if (g.trail) {
         anyTrail = true; upTotal += g.trail.up;
-        L.polyline(g.trail.coords.map(function (c) { return [c[0], c[1]]; }),
+        line = L.polyline(g.trail.coords.map(function (c) { return [c[0], c[1]]; }),
           { color: g.color, weight: 4, opacity: .9, className: 'day-line routed' }).addTo(layer);
       } else {
-        L.polyline(g.pts.map(function (p) { return [p.lat, p.lon]; }),
+        line = L.polyline(g.pts.map(function (p) { return [p.lat, p.lon]; }),
           { color: g.color, weight: 4, opacity: .9, className: 'day-line straight' }).addTo(layer);
       }
+      dayLines.push(line);
       g.pts.forEach(function (p, i) {
         k++;
         var first = gi === 0 && i === 0, last = gi === dayGroups.length - 1 && i === g.pts.length - 1;
@@ -584,9 +611,11 @@
         var dist = route ? distToRouteM(p, route) : NaN;
         var isOff = isFinite(dist) && dist > OFF_ROUTE_M;
         if (isOff) off++;
-        L.circleMarker([p.lat, p.lon], {
+        var marker = L.circleMarker([p.lat, p.lon], {
           radius: 6, color: '#fff', weight: 2, fillColor: fill, fillOpacity: 1, className: isOff ? 'off-route' : ''
-        }).bindPopup('<b>Photo ' + k + ' of ' + sorted.length + '</b> · day ' + (gi + 1) + '<br>' + fmtTime(p.t) +
+        });
+        markerRefs.push({ m: marker, t: p.t, day: gi });
+        marker.bindPopup('<b>Photo ' + k + ' of ' + sorted.length + '</b> · day ' + (gi + 1) + '<br>' + fmtTime(p.t) +
           (isFinite(dist) ? '<br>' + (dist < 1000 ? Math.round(dist) + ' m' : (dist / 1000).toFixed(1) + ' km') + ' from route' : '') +
           '<br><small>' + p.lat.toFixed(5) + ', ' + p.lon.toFixed(5) + '</small>').addTo(layer);
       });
@@ -602,6 +631,7 @@
     $('s-off-wrap').classList.toggle('hidden', !route);
     $('s-up').textContent = upTotal;
     $('s-up-wrap').classList.toggle('hidden', !anyTrail);
+    buildTimeline();
     $('btn-trails').classList.toggle('hidden', !has);
     $('btn-trails').textContent = dayGroups.every(function (g) { return g.trail || g.wps.length < 2; }) ? 'Trails ✓' : 'Trails + elevation';
 
@@ -661,9 +691,11 @@
     }).catch(function (e) { setMsg('Route not loaded: ' + e.message, true); });
   }
   function fetchAv1() {
-    // The relation by id first; by name as a fallback in case it is ever renumbered.
+    // The relation by id, plus a name search in case it is ever renumbered. The union comes first and
+    // the recursion after it: inside a union block, statements cannot see each other's results.
     var q = '[out:json][timeout:90];' +
-      '(relation(' + AV1_RELATION + ');relation["route"="hiking"]["name"~"alta via.*(n\\\\.|nr\\\\.|n|nr)? ?1( |$|[^0-9])",i](' + AV1_BBOX + ');>>;);out geom;';
+      '(relation(' + AV1_RELATION + ');relation["route"="hiking"]["name"~"alta via.*(n\\\\.|nr\\\\.|n|nr)? ?1( |$|[^0-9])",i](' + AV1_BBOX + '););' +
+      'out tags;>>;out geom;';
     setMsg('Fetching Alta Via 1 from OpenStreetMap…');
     $('btn-osm').disabled = true;
     fetch(OVERPASS, { method: 'POST', body: 'data=' + encodeURIComponent(q),
@@ -675,6 +707,115 @@
       })
       .catch(function (e) { setMsg('OpenStreetMap fetch failed: ' + e.message, true); })
       .then(function () { $('btn-osm').disabled = false; });
+  }
+
+  // ---------- timeline: where you were at any moment of the walk ----------
+  // Per day, a path of {lat, lon, ele, d (km so far), t (ms)}: the routed trail with photo times pinned to
+  // their nearest vertices and interpolated by distance in between, or the photo points themselves.
+  function buildPath(g) {
+    var pts = g.pts.filter(function (p) { return !isNaN(p.t); });
+    if (!pts.length) return [];
+    var path, i;
+    if (g.trail && g.trail.coords.length > 1) {
+      path = g.trail.coords.map(function (c) { return { lat: c[0], lon: c[1], ele: c[2], d: 0, t: NaN }; });
+      for (i = 1; i < path.length; i++) path[i].d = path[i - 1].d + haversineKm(path[i - 1], path[i]);
+      var from = 0;
+      pts.forEach(function (p) {
+        var best = from, bd = Infinity;
+        for (var j = from; j < path.length; j++) { var dd = haversineKm(p, path[j]); if (dd < bd) { bd = dd; best = j; } }
+        if (isNaN(path[best].t)) path[best].t = p.t;
+        from = best;
+      });
+      var known = [];
+      path.forEach(function (x, idx) { if (!isNaN(x.t)) known.push(idx); });
+      for (i = 0; i < known[0]; i++) path[i].t = path[known[0]].t;
+      for (var k = 0; k + 1 < known.length; k++) {
+        var a = known[k], b = known[k + 1], ta = path[a].t, tb = path[b].t, da = path[a].d, db = path[b].d;
+        for (i = a + 1; i < b; i++) path[i].t = db > da ? ta + (tb - ta) * (path[i].d - da) / (db - da) : ta;
+      }
+      for (i = known[known.length - 1] + 1; i < path.length; i++) path[i].t = path[known[known.length - 1]].t;
+    } else {
+      path = pts.map(function (p) { return { lat: p.lat, lon: p.lon, ele: NaN, d: 0, t: p.t }; });
+      for (i = 1; i < path.length; i++) path[i].d = path[i - 1].d + haversineKm(path[i - 1], path[i]);
+    }
+    return path;
+  }
+  function buildTimeline() {
+    tlDays = []; tlTotal = 0;
+    dayGroups.forEach(function (g, gi) {
+      var path = buildPath(g);
+      if (!path.length) return;
+      var t0 = path[0].t, t1 = path[path.length - 1].t, dur = Math.max(t1 - t0, MIN_DAY_MS);
+      tlDays.push({ gi: gi, path: path, t0: t0, dur: dur, offset: tlTotal });
+      tlTotal += dur;
+    });
+    $('timeline').classList.toggle('hidden', !tlDays.length);
+    if (!tlDays.length) { stopPlay(); progressLayer.clearLayers(); return; }
+    applyTimeline(+$('tl').value);
+  }
+  // Slider value -> {day, t, lat, lon, ele, km}
+  function timelineAt(v) {
+    if (!tlDays.length) return null;
+    var walk = Math.max(0, Math.min(1, v / TL_MAX)) * tlTotal;
+    var day = tlDays[tlDays.length - 1];
+    for (var i = 0; i < tlDays.length; i++) if (walk < tlDays[i].offset + tlDays[i].dur) { day = tlDays[i]; break; }
+    var t = day.t0 + Math.min(day.dur, walk - day.offset), path = day.path;
+    var j = 0;
+    while (j < path.length && path[j].t < t) j++;
+    if (j === 0) return { day: day, index: 0, frac: 0, t: t, lat: path[0].lat, lon: path[0].lon, ele: path[0].ele, km: 0 };
+    if (j >= path.length) { var last = path[path.length - 1]; return { day: day, index: path.length - 1, frac: 0, t: t, lat: last.lat, lon: last.lon, ele: last.ele, km: last.d }; }
+    var a = path[j - 1], b = path[j], f = b.t > a.t ? (t - a.t) / (b.t - a.t) : 1;
+    return { day: day, index: j - 1, frac: f, t: t, lat: a.lat + (b.lat - a.lat) * f, lon: a.lon + (b.lon - a.lon) * f,
+      ele: isFinite(a.ele) && isFinite(b.ele) ? a.ele + (b.ele - a.ele) * f : NaN, km: a.d + (b.d - a.d) * f };
+  }
+  function applyTimeline(v) {
+    progressLayer.clearLayers();
+    var atEnd = v >= TL_MAX || !tlDays.length;
+    var pos = atEnd ? null : timelineAt(v);
+    dayLines.forEach(function (line, gi) {
+      var full = atEnd || gi < pos.day.gi;
+      line.setStyle({ opacity: full ? .9 : .18 });
+    });
+    markerRefs.forEach(function (r) {
+      var reached = atEnd || r.day < pos.day.gi || (r.day === pos.day.gi && (isNaN(r.t) || r.t <= pos.t));
+      r.m.setStyle({ opacity: reached ? 1 : .25, fillOpacity: reached ? 1 : .25 });
+    });
+    if (atEnd) { $('tl-label').textContent = ''; return; }
+    var g = dayGroups[pos.day.gi], path = pos.day.path;
+    var partial = path.slice(0, pos.index + 1).map(function (x) { return [x.lat, x.lon]; });
+    partial.push([pos.lat, pos.lon]);
+    L.polyline(partial, { color: g.color, weight: 5, opacity: 1, className: 'progress-line' }).addTo(progressLayer);
+    L.circleMarker([pos.lat, pos.lon], { radius: 9, color: '#fff', weight: 3, fillColor: g.color, fillOpacity: 1, className: 'walker' }).addTo(progressLayer);
+    $('tl-label').textContent = 'Day ' + (pos.day.gi + 1) + ' · ' + fmtDay(g.key) + ' · ' +
+      new Date(pos.t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) +
+      ' · ' + pos.km.toFixed(1) + ' km' + (isFinite(pos.ele) ? ' · ' + Math.round(pos.ele) + ' m' : '');
+    if (playing && !map.getBounds().pad(-0.2).contains([pos.lat, pos.lon])) map.panTo([pos.lat, pos.lon]);
+  }
+  function stopPlay() {
+    playing = false;
+    if (playHandle) { cancelAnimationFrame(playHandle); playHandle = null; }
+    $('btn-play').textContent = '▶';
+  }
+  function togglePlay() {
+    if (playing) { stopPlay(); return; }
+    if (!tlDays.length) return;
+    var slider = $('tl');
+    if (+slider.value >= TL_MAX) slider.value = 0;
+    playing = true;
+    $('btn-play').textContent = '❚❚';
+    var last = null, perMs = TL_MAX / (tlDays.length * DAY_PLAY_MS);
+    var step = function (now) {
+      if (!playing) return;
+      if (last !== null) {
+        var v = Math.min(TL_MAX, +slider.value + (now - last) * perMs);
+        slider.value = v;
+        applyTimeline(v);
+        if (v >= TL_MAX) { stopPlay(); return; }
+      }
+      last = now;
+      playHandle = requestAnimationFrame(step);
+    };
+    playHandle = requestAnimationFrame(step);
   }
 
   // ---------- trails: route each day's photos along hiking paths with BRouter ----------
@@ -830,12 +971,17 @@
   $('btn-clear-route').addEventListener('click', function () { setRoute(null, true); setMsg('Route cleared.'); });
   $('btn-tiles').addEventListener('click', toggleTiles);
   $('btn-trails').addEventListener('click', routeAllDays);
+  $('tl').addEventListener('input', function () { stopPlay(); applyTimeline(+this.value); });
+  $('btn-play').addEventListener('click', togglePlay);
 
   // Exposed for the test-suite only.
   window.__hike = {
     points: function () { return sortByTime(points); },
     days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, color: g.color, wps: g.wps.length, trail: g.trail ? { n: g.trail.coords.length, km: g.trail.km, up: g.trail.up, down: g.trail.down } : null }; }); },
     elevationGain: elevationGain, dayWaypoints: dayWaypoints,
+    timelineAt: function (v) { var p = timelineAt(v); return p && { day: p.day.gi, t: p.t, lat: p.lat, lon: p.lon, ele: p.ele, km: p.km }; },
+    timelineTotal: function () { return tlTotal; },
+    setTimeline: function (v) { $('tl').value = v; applyTimeline(v); },
     route: function () { return route; },
     gpx: gpx, shareLink: shareLink, totalKm: totalKm, parsePointList: parsePointList, exifGps: exifGps,
     parseGpx: parseGpx, parseOverpass: parseOverpass, distToRouteM: distToRouteM, heifExifItem: heifExifItem, parseCoord: parseCoord

@@ -209,7 +209,16 @@ await page.goto(base + hash); await ready();
 await page.click('#btn-osm');
 await page.waitForFunction(() => document.getElementById('msg').textContent.includes('OpenStreetMap:'));
 check((await page.locator('#msg').innerText()).includes('"Alta Via 1" loaded from OpenStreetMap: 2 ways, 5 points'), 'relation name, way and point counts reported');
-check(sentQuery.includes('[out:json]') && sentQuery.includes('(relation(177743);relation["route"="hiking"]["name"~"alta via.*(n\\\\.|nr\\\\.|n|nr)? ?1( |$|[^0-9])",i](') && sentQuery.includes('>>;);out geom;'), `query shape: ${sentQuery}`);
+check(sentQuery.includes('[out:json]') && sentQuery.includes('(relation(177743);relation["route"="hiking"]["name"~"alta via.*(n\\\\.|nr\\\\.|n|nr)? ?1( |$|[^0-9])",i](') && sentQuery.endsWith('););out tags;>>;out geom;'), `query shape: ${sentQuery}`);
+// a relation that carries its members' geometry itself, plus the same way as a separate element: no duplicates
+const po = await page.evaluate(() => window.__hike.parseOverpass({ elements: [
+  { type: 'relation', id: 177743, tags: { name: 'Alta via n. 1 delle Dolomiti' }, members: [
+    { type: 'way', ref: 7, role: '', geometry: [{ lat: 46.5, lon: 12 }, { lat: 46.51, lon: 12 }] },
+    { type: 'node', ref: 8, role: 'guidepost', lat: 46.5, lon: 12 },
+    { type: 'relation', ref: 9, role: '' }] },
+  { type: 'way', id: 7, geometry: [{ lat: 46.5, lon: 12 }, { lat: 46.51, lon: 12 }] },
+  { type: 'way', id: 10, geometry: [{ lat: 46.51, lon: 12 }, { lat: 46.52, lon: 12.01 }] }] }));
+check(po.name === 'Alta via n. 1 delle Dolomiti' && po.segs.length === 2, `member geometry read, way 7 not duplicated (${po.segs.length} segments)`);
 check((await lines('ref-route')) === 2, '2 reference segments from the ways');
 check((await page.locator('#stats').innerText()).includes('4 off route'), 'off-route recomputed against the fetched route');
 await page.unroute('**/api/interpreter');
@@ -335,6 +344,9 @@ check((await page.locator('#stats').innerText()).includes('↑ 100 m'), 'total a
 check((await page.locator('#btn-trails').innerText()) === 'Trails ✓', 'button shows done');
 const g2 = await page.evaluate(() => window.__hike.gpx());
 check((g2.match(/<ele>/g) || []).length === 16 && g2.includes('on trails'), 'GPX carries routed points with elevation');
+// timeline on a routed day: half-way in time is half-way along the trail, with elevation interpolated
+const tlr = await page.evaluate(() => window.__hike.timelineAt(10000 * 30 / 121));
+check(tlr && tlr.day === 0 && near(tlr.lat, 46.535, 1e-6) && near(tlr.ele, 1017.5, 1e-2), `timeline follows the routed trail: lat ${tlr && tlr.lat.toFixed(4)}, ele ${tlr && tlr.ele}`);
 const before = brReqs.length;
 await page.reload(); await ready();
 await page.waitForSelector('path.routed', { state: 'attached' });
@@ -365,6 +377,42 @@ await page.waitForFunction(() => /days on trails/.test(document.getElementById('
 const nm = await page.locator('#msg2').innerText();
 check(nm.includes('network error'), `network failure named: ${nm}`);
 await page.unroute('**/brouter?*');
+
+// ---- 11. walk timeline ----
+console.log('11. walk timeline');
+await page.evaluate(() => localStorage.removeItem('hike-map.trails.v1'));   // forget section 10's routed days: straight lines here
+await page.goto(base + hash); await page.reload(); await ready();   // reload: a hash-only goto keeps the in-memory cache. 3 days: 60 min, 60 min, 1 min
+await page.waitForFunction(() => document.getElementById('msg2').textContent.includes('days on trails'));   // routing (mock 503) settled
+check((await page.evaluate(() => window.__hike.timelineTotal())) === 121 * 60000, 'walk time is the sum of the days, 121 min');
+check(await page.locator('#timeline').isVisible() && (await page.locator('#tl').inputValue()) === '10000', 'slider shown, at the end');
+check((await page.locator('path.walker').count()) === 0 && (await page.locator('#tl-label').innerText()) === '', 'nothing animated at the end');
+const v30 = 10000 * 30 / 121;
+const p30 = await page.evaluate(v => window.__hike.timelineAt(v), v30);
+check(p30.day === 0 && near(p30.lat, 46.535, 1e-9) && near(p30.lon, 12.005, 1e-9) && near(p30.km, pathKm([[46.52, 12], [46.55, 12.01]]) / 2, 1e-9), `30 min in: half-way along day 1 (${p30.lat}, ${p30.lon}, ${p30.km.toFixed(3)} km)`);
+await page.evaluate(v => window.__hike.setTimeline(v), v30);
+check((await page.locator('path.walker').count()) === 1 && (await page.locator('path.progress-line').count()) === 1, 'walker and progress line drawn');
+const lbl = await page.locator('#tl-label').innerText();
+check(/^Day 1 · .*08:30( AM)? · 1\.7 km$/.test(lbl), `label: ${lbl}`);
+const faint = await page.evaluate(() => [...document.querySelectorAll('path.day-line')].map(p => p.getAttribute('stroke-opacity')));
+check(faint.join(',') === '0.18,0.18,0.18', `day lines faint while day 1 is in progress (${faint})`);
+const mk = await page.evaluate(() => [...document.querySelectorAll('path.leaflet-interactive')].filter(p => p.getAttribute('fill-opacity') !== null && !p.classList.contains('day-line') && !p.classList.contains('walker')).map(p => p.getAttribute('fill-opacity')));
+check(mk.filter(x => x === '1').length === 1 && mk.filter(x => x === '0.25').length === 4, `1 photo reached, 4 faded (${mk})`);
+await page.evaluate(v => window.__hike.setTimeline(v), 10000 * 90 / 121);
+const faint2 = await page.evaluate(() => [...document.querySelectorAll('path.day-line')].map(p => p.getAttribute('stroke-opacity')));
+check(faint2.join(',') === '0.9,0.18,0.18' && (await page.locator('#tl-label').innerText()).startsWith('Day 2'), `day 1 complete, day 2 in progress (${faint2})`);
+await page.evaluate(() => window.__hike.setTimeline(10000));
+const faint3 = await page.evaluate(() => [...document.querySelectorAll('path.day-line')].map(p => p.getAttribute('stroke-opacity')));
+check(faint3.join(',') === '0.9,0.9,0.9' && (await page.locator('path.walker').count()) === 0, 'back to the end: everything drawn, walker gone');
+await page.click('#btn-play');
+await page.waitForFunction(() => document.querySelector('path.walker') !== null);
+await page.waitForTimeout(400);
+const vPlay = +(await page.locator('#tl').inputValue());
+check(vPlay > 0 && vPlay < 10000 && (await page.locator('#btn-play').innerText()) === '❚❚', `playing from the start (slider at ${Math.round(vPlay)})`);
+await page.click('#btn-play');
+const vPause = +(await page.locator('#tl').inputValue());
+await page.waitForTimeout(300);
+check(+(await page.locator('#tl').inputValue()) === vPause && (await page.locator('#btn-play').innerText()) === '▶', 'paused');
+await page.evaluate(() => window.__hike.setTimeline(10000));
 
 // ---- 9. tiles toggle and layout ----
 console.log('9. tiles and layout');

@@ -72,6 +72,15 @@ browser. It reads a few hundred KB per photo, shows "Reading N of M" as it goes 
   routed keep their straight line and are named in the message.
 * **Download GPX** saves one track per day, on the routed trail with
   elevation where available, plus a waypoint per photo.
+* **Walk timeline.** The slider above the day list runs over the trip's
+  walking time (the days back to back, nights skipped). Drag it and the map
+  shows the walk up to that moment: the trail drawn so far in the day's
+  colour, a walker marker at the current position, photos not yet reached
+  faded, and a label with day, time of day, distance so far and altitude.
+  ▶ plays the whole trip, five seconds per day, following the walker. Between
+  two photos the position is interpolated by distance along the routed trail
+  (or the straight line when a day is not routed), so it is a reconstruction
+  of pace, not a recording.
 
 ## Optional: the Shortcut
 
@@ -185,8 +194,9 @@ Playwright, and checks parsing of every link form, time-sorting, day grouping,
 distance sums against an independent haversine, GPX output, route loading from
 a file, from `routes/` and from a mocked Overpass response (including the
 failure path), off-route detection, trail routing against a mocked BRouter (profile
-fallback, request chunking, elevation gain, caching, failure), persistence
-across reloads, the empty and malformed states, and the JPEG and HEIC Exif readers against fixtures it builds
+fallback, request chunking, elevation gain, caching, failure), the walk
+timeline (time-to-position mapping on straight and routed days, fading,
+play and pause), persistence across reloads, the empty and malformed states, and the JPEG and HEIC Exif readers against fixtures it builds
 byte by byte, including a HEIC whose Exif sits past the first megabyte. It
 resolves Playwright from the global npm root if it is not installed locally.
 
