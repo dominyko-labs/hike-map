@@ -501,10 +501,21 @@ for (const f of [rec1, rec2, rec3]) fs.unlinkSync(f);
 
 // ---- 9. tiles toggle and layout ----
 console.log('9. tiles and layout');
+check((await page.locator('#btn-tiles').innerText()) === 'Map: Street', 'starts on street tiles');
 await page.click('#btn-tiles');
-check(await page.locator('#btn-tiles').innerText() === 'Street tiles', 'topo tiles toggled on');
-check(await page.evaluate(() => !!document.querySelector('img.leaflet-tile[src*="opentopomap"]')), 'opentopomap tile URLs requested');
+check((await page.locator('#btn-tiles').innerText()) === 'Map: Topo' && await page.evaluate(() => !!document.querySelector('img.leaflet-tile[src*="opentopomap"]')), 'topo tiles');
 await page.click('#btn-tiles');
+check((await page.locator('#btn-tiles').innerText()) === 'Map: Topo + trails' && await page.evaluate(() => !!document.querySelector('img.leaflet-tile[src*="waymarkedtrails.org/hiking"]')), 'marked-trails overlay requested on top of topo');
+page.once('dialog', d => d.dismiss());                     // custom tiles asked for a URL: cancel -> back to street
+await page.click('#btn-tiles');
+check((await page.locator('#btn-tiles').innerText()) === 'Map: Street' && !(await page.evaluate(() => !!document.querySelector('img.leaflet-tile[src*="waymarkedtrails"]'))), 'cancelled custom URL falls back to street, overlay removed');
+await page.evaluate(() => window.__hike.setCustomTiles('https://tiles.example.test/outdoor/{z}/{x}/{y}.png?key=abc'));
+await page.click('#btn-tiles'); await page.click('#btn-tiles'); await page.click('#btn-tiles');
+check((await page.locator('#btn-tiles').innerText()) === 'Map: Custom' && await page.evaluate(() => !!document.querySelector('img.leaflet-tile[src*="tiles.example.test/outdoor/"]')), 'custom tile template used');
+await page.reload(); await ready();
+check((await page.locator('#btn-tiles').innerText()) === 'Map: Custom', 'tile choice remembered');
+await page.click('#btn-tiles');
+check((await page.locator('#btn-tiles').innerText()) === 'Map: Street', 'cycles back to street');
 const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
 check(!overflow, 'no horizontal overflow at 390px');
 check(errors.length === 0, `no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);

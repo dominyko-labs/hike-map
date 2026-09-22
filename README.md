@@ -56,9 +56,15 @@ absolute, so they line up with a recorded GPX taken in another time zone. It rea
   nearest point of the route gets a red ring and the stats line counts them.
   Tap a pin to see its distance from the route. That is how your custom
   variants show up: a run of red-ringed pins on a line that leaves the dashes.
-* **Tiles.** Street tiles from OpenStreetMap, or **Topo tiles** from
-  OpenTopoMap with contour lines, huts and marked trails. The choice is
-  remembered on the device.
+* **Map.** The map button cycles through four backgrounds, remembered on
+  the device: **Street** (OpenStreetMap), **Topo** (OpenTopoMap, contour
+  lines, huts), **Topo + trails** (the same with the
+  [Waymarked Trails](https://hiking.waymarkedtrails.org) overlay: every marked
+  hiking route with its number and colour, Alta Via 1 included), and
+  **Custom**, which asks once for a tile URL template with `{z}/{x}/{y}` so a
+  licensed provider (Thunderforest Outdoors with a free key, a MapTiler
+  outdoor style, or any WMTS you have rights to) can be used. Tabacco maps
+  are not available as a public tile service and are not included.
 * **Recorded GPX.** The best input there is. Pick one or more GPX files
   recorded by Strava, AllTrails, a watch or any tracking app. Each file is
   split by calendar day, thinned to one point per 5 m (or 60 s), and used as
@@ -223,8 +229,9 @@ across reloads, the empty and malformed states, and the JPEG and HEIC Exif reade
 byte by byte, including a HEIC whose Exif sits past the first megabyte. It
 resolves Playwright from the global npm root if it is not installed locally.
 
-Map tiles come from `tile.openstreetmap.org` and `opentopomap.org` at view time
-under their usage policies; fine for personal use. Route data fetched from
+Map tiles come from `tile.openstreetmap.org`, `opentopomap.org` and
+`tile.waymarkedtrails.org` at view time under their usage policies; fine for
+personal use. Route data fetched from
 Overpass and trails from BRouter are © OpenStreetMap contributors, ODbL; BRouter's
 elevation comes from public SRTM data.
 
