@@ -74,6 +74,9 @@
   .leaflet-container { font: inherit; }
   .leaflet-popup-content { margin: 10px 12px; font-size: 14px; }
   .off-route { stroke: var(--end); stroke-width: 3; }
+  .hut { background: none; border: 0; }
+  .hut .pin { display: inline-block; width: 18px; height: 18px; border-radius: 4px 4px 4px 0; background: #8b4513; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.4); transform: rotate(-45deg); }
+  .hut .lbl { position: absolute; left: 22px; top: -2px; white-space: nowrap; font: 600 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #3b2a14; background: rgba(255,255,255,.85); padding: 1px 5px; border-radius: 4px; pointer-events: none; }
 </style>
 </head>
 <body>
@@ -113,6 +116,7 @@
     <button id="btn-clear-rec" class="hidden" type="button">Clear recordings</button>
     <label class="btn">Route GPX<input id="route-file" type="file" accept=".gpx,application/gpx+xml,application/xml,text/xml"></label>
     <button id="btn-osm" type="button">Alta Via 1 from OSM</button>
+    <button id="btn-huts" class="hidden" type="button">Huts from OSM</button>
     <button id="btn-route-gpx" class="hidden" type="button">Save route GPX</button>
     <button id="btn-clear-route" class="hidden" type="button">Clear route</button>
     <button id="btn-tiles" type="button">Map: Street</button>
@@ -138,6 +142,8 @@
   var STORE_KEY = 'hike-map.route.v1';
   var TRAILS_KEY = 'hike-map.trails.v1';
   var REC_KEY = 'hike-map.recorded.v1';
+  var HUTS_KEY = 'hike-map.huts.v1';
+  var HUT_NEAR_M = 1200;       // a hut counts when within this distance of a walked line or photo
   var REC_MIN_M = 5, REC_MAX_GAP_MS = 60000, REC_MAX_PTS = 4000;
   var DIST_STEP_M = 3;         // distance counts a recorded point once it is 3 m from the last counted one: within 5 % of Strava on all three
   var DEM_HYST_M = 10, DEM_SMOOTH_M = 30;   // routed days: terrain-model elevations are smoothed over ±30 m and thresholded at 10 m
@@ -166,6 +172,8 @@
   var dayGroups = [];
   var trails = {};      // waypoint-hash -> {coords: [[lat, lon, ele], ...], km, up, down}
   var recorded = {};    // day key -> {coords: [[lat, lon, ele, t], ...], km, up, down, name}
+  var huts = [];        // [{lat, lon, name, ele}] near the walk
+  var hutLayer;
   var routing = false;
   var progressLayer, dayLines = [], markerRefs = [], tlDays = [], tlTotal = 0, playing = false, playHandle = null;
   var TL_MAX = 10000, DAY_PLAY_MS = 5000, MIN_DAY_MS = 60000;
@@ -613,6 +621,7 @@
     refLayer = L.layerGroup().addTo(map);
     layer = L.layerGroup().addTo(map);
     progressLayer = L.layerGroup().addTo(map);
+    hutLayer = L.layerGroup().addTo(map);
   }
   function customTilesUrl() {
     try { return localStorage.getItem(CUSTOM_TILES_KEY) || ''; } catch (e) { return ''; }
@@ -725,6 +734,7 @@
     $('btn-trails').classList.toggle('hidden', !has);
     $('btn-3d').classList.toggle('hidden', !has && !view3d);
     $('btn-center').classList.toggle('hidden', !has && !view3d);
+    $('btn-huts').classList.toggle('hidden', !has);
     $('btn-trails').textContent = dayGroups.every(function (g) { return g.trail || g.wps.length < 2; }) ? 'Trails ✓' : 'Trails + elevation';
 
     var ul = $('days');
@@ -837,6 +847,59 @@
     });
     lines.push('  </trk>', '</gpx>', '');
     return lines.join('\n');
+  }
+
+  // ---------- huts (rifugi): OpenStreetMap alpine huts near the walk ----------
+  function restoreHuts() {
+    try { var s = localStorage.getItem(HUTS_KEY); if (s) huts = JSON.parse(s) || []; } catch (e) { huts = []; }
+  }
+  function saveHuts() { try { localStorage.setItem(HUTS_KEY, JSON.stringify(huts)); } catch (e) { /* blocked */ } }
+  // Lines and photos of every day as one reference, for the distance filter
+  function walkedRoute() {
+    var segs = [];
+    dayGroups.forEach(function (g) {
+      var path = buildPath(g), pts = (path.length ? path : g.pts).map(function (p) { return { lat: p.lat, lon: p.lon }; });
+      if (pts.length > 1) segs.push(pts); else if (pts.length === 1) segs.push([pts[0], pts[0]]);
+    });
+    return { segs: segs };
+  }
+  function parseHuts(json) {
+    var out = [];
+    (json.elements || []).forEach(function (el) {
+      if (el.type !== 'node' || !isFinite(el.lat) || !isFinite(el.lon)) return;
+      var t = el.tags || {};
+      var name = t.name || t['name:it'] || t['name:de'] || t['name:en'] || '';
+      if (!name) return;
+      var ele = parseFloat(t.ele);
+      out.push({ lat: el.lat, lon: el.lon, name: name.slice(0, 60), ele: isFinite(ele) ? Math.round(ele) : null });
+    });
+    return out;
+  }
+  function fetchHuts() {
+    var b = bounds3d();
+    if (!b) return;
+    var pad = 0.02;
+    var q = '[out:json][timeout:60];node["tourism"~"^(alpine_hut|wilderness_hut)$"](' +
+      (b.south - pad) + ',' + (b.west - pad) + ',' + (b.north + pad) + ',' + (b.east + pad) + ');out body;';
+    setMsg('Fetching huts from OpenStreetMap…');
+    $('btn-huts').disabled = true;
+    overpass(q).then(function (json) {
+      var all = parseHuts(json), ref = walkedRoute();
+      huts = all.filter(function (h) { return ref.segs.length && distToRouteM(h, ref) <= HUT_NEAR_M; });
+      saveHuts(); renderHuts();
+      setMsg(huts.length + ' hut' + (huts.length === 1 ? '' : 's') + ' near the walk (' + all.length + ' in the area). Saved on this device.');
+    }).catch(function (e) { setMsg('Huts fetch failed: ' + e.message, true); })
+      .then(function () { $('btn-huts').disabled = false; });
+  }
+  function renderHuts() {
+    hutLayer.clearLayers();
+    huts.forEach(function (h) {
+      var icon = L.divIcon({ className: 'hut', iconSize: [18, 18], iconAnchor: [9, 18],
+        html: '<span class="pin"></span><span class="lbl">' + esc(h.name) + '</span>' });
+      L.marker([h.lat, h.lon], { icon: icon, title: h.name })
+        .bindPopup('<b>' + esc(h.name) + '</b>' + (h.ele ? '<br>' + h.ele + ' m' : '')).addTo(hutLayer);
+    });
+    $('btn-huts').textContent = huts.length ? 'Huts ✓ (' + huts.length + ')' : 'Huts from OSM';
   }
 
   // ---------- recorded tracks (Strava, AllTrails, a watch): the real walk for a day ----------
@@ -1048,7 +1111,7 @@
     $('btn-3d').disabled = true;
     setMsg('3D: loading…');
     var mode = TILE_MODES[tileMode];
-    var texUrl = mode.custom ? customTilesUrl() : mode.url;
+    var texUrl = mode.custom ? customTilesUrl() : TILE_MODES[1].url;   // relief reads best under the topo tiles
     var days = dayGroups.map(function (g) {
       var path = buildPath(g);
       return { color: g.color, coords: (path.length ? path : g.pts).map(function (p) { return [p.lat, p.lon]; }), photos: g.pts.map(function (p) { return [p.lat, p.lon]; }) };
@@ -1056,7 +1119,7 @@
     import('./view3d.js').then(function (m) {
       $('map').classList.add('hidden');
       $('map3d').classList.remove('hidden');
-      return m.build({ container: $('map3d'), bounds: b, days: days, textureUrl: texUrl, onProgress: setMsg });
+      return m.build({ container: $('map3d'), bounds: b, days: days, huts: huts, textureUrl: texUrl, onProgress: setMsg });
     }).then(function (v) {
       view3d = v;
       var st = v.state();
@@ -1224,6 +1287,8 @@
   restoreRoute();
   restoreTrails();
   restoreRecorded();
+  restoreHuts();
+  renderHuts();
   renderRoute();
   loadFromHash();
   window.addEventListener('hashchange', loadFromHash);
@@ -1250,6 +1315,7 @@
   $('btn-play').addEventListener('click', togglePlay);
   $('btn-3d').addEventListener('click', function () { if (view3d) exit3d(); else enter3d(); });
   $('btn-center').addEventListener('click', centerView);
+  $('btn-huts').addEventListener('click', fetchHuts);
 
   // Exposed for the test-suite only.
   window.__hike = {
@@ -1257,7 +1323,7 @@
     days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, dur: g.dur, color: g.color, wps: g.wps.length, trail: g.trail ? { n: g.trail.coords.length, km: g.trail.km, up: g.trail.up, down: g.trail.down, recorded: !!g.trail.recorded } : null }; }); },
     thinTrack: thinTrack, recordedKm: recordedKm, smoothElevation: smoothElevation,
     tileMode: function () { return TILE_MODES[tileMode].name; }, setCustomTiles: function (u) { localStorage.setItem(CUSTOM_TILES_KEY, u); },
-    view3d: function () { return view3d; }, bounds3d: bounds3d, mapCenter: function () { var c = map.getCenter(); return { lat: c.lat, lon: c.lng, zoom: map.getZoom() }; },
+    view3d: function () { return view3d; }, bounds3d: bounds3d, huts: function () { return huts; }, parseHuts: parseHuts, mapCenter: function () { var c = map.getCenter(); return { lat: c.lat, lon: c.lng, zoom: map.getZoom() }; }, panMap: function (dx, dy) { map.panBy([dx, dy], { animate: false }); },
     elevationGain: elevationGain, dayWaypoints: dayWaypoints,
     timelineAt: function (v) { var p = timelineAt(v); return p && { day: p.day.gi, t: p.t, lat: p.lat, lon: p.lon, ele: p.ele, km: p.km }; },
     timelineTotal: function () { return tlTotal; },

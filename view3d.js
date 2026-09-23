@@ -9,7 +9,8 @@ import { LineMaterial } from './vendor/three/lines/LineMaterial.js';
 
 const TERRAIN_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
 const MAX_TILES = 36;          // terrain tiles per scene (6 x 6 at most)
-const STEP = 8;                // sample every 8th DEM pixel: 33 x 33 vertices per tile
+const STEP = 4;                // sample every 4th DEM pixel: 65 x 65 vertices per tile
+const SKIRT_M = 250;           // the block is cut SKIRT_M below its lowest point, with textured sides
 const EXAG = 1.25;             // vertical exaggeration
 const TRACK_LIFT = 12;         // metres above the surface for tubes and spheres
 const TILE = 256;
@@ -44,7 +45,7 @@ function pickBlock(bounds) {
 }
 
 export async function build(opts) {
-  const { container, bounds, days, textureUrl, onProgress = () => {} } = opts;
+  const { container, bounds, days, huts = [], textureUrl, onProgress = () => {} } = opts;
   const blk = pickBlock(bounds);
   if (!blk) throw new Error('area too large');
   const W = blk.nx * TILE, H = blk.ny * TILE;
@@ -94,21 +95,40 @@ export async function build(opts) {
       if (h < minH) minH = h; if (h > maxH) maxH = h;
     }
   }
-  const idx = new Uint32Array((gw - 1) * (gh - 1) * 6);
-  for (let j = 0, k = 0; j < gh - 1; j++) for (let i = 0; i < gw - 1; i++) {
+  // boundary ring in order (top row, right column, bottom row reversed, left column reversed)
+  const ring = [];
+  for (let i = 0; i < gw; i++) ring.push(i);
+  for (let j = 1; j < gh; j++) ring.push(j * gw + gw - 1);
+  for (let i = gw - 2; i >= 0; i--) ring.push((gh - 1) * gw + i);
+  for (let j = gh - 2; j >= 1; j--) ring.push(j * gw);
+  const base = gw * gh, floorY = (minH - SKIRT_M) * EXAG;
+  const pos2 = new Float32Array((base + ring.length) * 3), uv2 = new Float32Array((base + ring.length) * 2);
+  pos2.set(pos); uv2.set(uv);
+  ring.forEach((v, r) => {
+    const k = base + r;
+    pos2[k * 3] = pos[v * 3]; pos2[k * 3 + 1] = floorY; pos2[k * 3 + 2] = pos[v * 3 + 2];
+    uv2[k * 2] = uv[v * 2]; uv2[k * 2 + 1] = uv[v * 2 + 1];
+  });
+  const idx = new Uint32Array((gw - 1) * (gh - 1) * 6 + ring.length * 6);
+  let k = 0;
+  for (let j = 0; j < gh - 1; j++) for (let i = 0; i < gw - 1; i++) {
     const a = j * gw + i, b = a + 1, c = a + gw, d = c + 1;
     idx[k++] = a; idx[k++] = c; idx[k++] = b; idx[k++] = b; idx[k++] = c; idx[k++] = d;
   }
+  for (let r = 0; r < ring.length; r++) {
+    const a = ring[r], b = ring[(r + 1) % ring.length], a2 = base + r, b2 = base + (r + 1) % ring.length;
+    idx[k++] = a; idx[k++] = b; idx[k++] = a2; idx[k++] = b; idx[k++] = b2; idx[k++] = a2;
+  }
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setAttribute('position', new THREE.BufferAttribute(pos2, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv2, 2));
   geo.setIndex(new THREE.BufferAttribute(idx, 1));
   geo.computeVertexNormals();
 
   // ---- texture: the map tiles, or a height tint when they cannot be read cross-origin ----
   let material, textureTiles = 0;
   try {
-    const tz = blk.nx * blk.ny * 4 <= 64 ? blk.z + 1 : blk.z, scale = Math.pow(2, tz - blk.z);
+    const tz = blk.nx * blk.ny * 4 <= 144 ? blk.z + 1 : blk.z, scale = Math.pow(2, tz - blk.z);
     const tc = document.createElement('canvas'); tc.width = W * scale; tc.height = H * scale;
     const tctx = tc.getContext('2d');
     const jobs = [];
@@ -120,12 +140,12 @@ export async function build(opts) {
     if (!textureTiles) throw new Error('no map tiles');
     tctx.getImageData(0, 0, 1, 1);                       // throws when a tile tainted the canvas
     const tex = new THREE.CanvasTexture(tc);
-    tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4;
+    tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8; tex.generateMipmaps = true; tex.minFilter = THREE.LinearMipmapLinearFilter;
     material = new THREE.MeshLambertMaterial({ map: tex });
   } catch (e) {
-    const colors = new Float32Array(gw * gh * 3);
-    for (let k = 0; k < gw * gh; k++) {
-      const t = clamp((pos[k * 3 + 1] / EXAG - minH) / Math.max(1, maxH - minH), 0, 1);
+    const nv = pos2.length / 3, colors = new Float32Array(nv * 3);
+    for (let k = 0; k < nv; k++) {
+      const t = clamp((pos2[k * 3 + 1] / EXAG - minH) / Math.max(1, maxH - minH), 0, 1);
       const c = new THREE.Color().setHSL(0.33 - 0.33 * t, 0.45, 0.35 + 0.45 * t);
       colors[k * 3] = c.r; colors[k * 3 + 1] = c.g; colors[k * 3 + 2] = c.b;
     }
@@ -137,11 +157,17 @@ export async function build(opts) {
 
   // ---- scene ----
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xdfe9f3);
+  const sky = document.createElement('canvas'); sky.width = 2; sky.height = 256;
+  const sctx = sky.getContext('2d'), grad = sctx.createLinearGradient(0, 0, 0, 256);
+  grad.addColorStop(0, '#5a8fd0'); grad.addColorStop(0.55, '#bcd6ee'); grad.addColorStop(1, '#eef2f5');
+  sctx.fillStyle = grad; sctx.fillRect(0, 0, 2, 256);
+  const skyTex = new THREE.CanvasTexture(sky); skyTex.colorSpace = THREE.SRGBColorSpace;
+  scene.background = skyTex;
   const spanX = (lonE - lonW) * mPerLon, spanZ = (latN - latS) * mPerLat, span = Math.max(spanX, spanZ);
-  scene.fog = new THREE.Fog(0xdfe9f3, span * 1.2, span * 4);
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x8a7f6a, 0.9));
-  const sun = new THREE.DirectionalLight(0xffffff, 1.4); sun.position.set(-0.6, 1, -0.4).multiplyScalar(span); scene.add(sun);
+  scene.fog = new THREE.Fog(0xd9e4ef, span * 1.5, span * 5);
+  scene.add(new THREE.HemisphereLight(0xe8f0ff, 0x6b5a45, 0.75));
+  const sun = new THREE.DirectionalLight(0xfff2dc, 1.9); sun.position.set(-0.7, 0.55, -0.5).multiplyScalar(span); scene.add(sun);   // low sun from the north-west: relief
+  const fill = new THREE.DirectionalLight(0xcfe0ff, 0.35); fill.position.set(0.6, 0.8, 0.7).multiplyScalar(span); scene.add(fill);
   scene.add(terrain);
 
   // ---- tracks (screen-space lines: same width at any zoom), photos, walker ----
@@ -182,6 +208,28 @@ export async function build(opts) {
     }));
     scene.add(photos);
   }
+  // huts: a brown pin and a label sprite
+  const labelSprite = (text, bg, fg) => {
+    const cv = document.createElement('canvas'), cx = cv.getContext('2d');
+    cx.font = '600 28px -apple-system, "Segoe UI", Roboto, sans-serif';
+    const w = Math.ceil(cx.measureText(text).width) + 28, h = 44; cv.width = w; cv.height = h;
+    cx.font = '600 28px -apple-system, "Segoe UI", Roboto, sans-serif';
+    cx.fillStyle = bg; cx.beginPath(); cx.roundRect(0, 0, w, h, 10); cx.fill();
+    cx.fillStyle = fg; cx.textBaseline = 'middle'; cx.fillText(text, 14, h / 2 + 1);
+    const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace;
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, depthTest: false, transparent: true }));
+    sp.scale.set(w / h * span * 0.045, span * 0.045, 1); sp.renderOrder = 10;
+    return sp;
+  };
+  const hutGroup = new THREE.Group();
+  huts.forEach(h => {
+    const l = toLocal(h.lat, h.lon), y = (heightAt(h.lat, h.lon) + TRACK_LIFT) * EXAG;
+    const pin = new THREE.Mesh(new THREE.ConeGeometry(sphereR * 1.6, sphereR * 5, 8), new THREE.MeshLambertMaterial({ color: 0x8b4513 }));
+    pin.position.set(l.x, y + sphereR * 2.5, l.z); pin.rotation.x = Math.PI; hutGroup.add(pin);
+    const lab = labelSprite(h.name, 'rgba(255,255,255,0.92)', '#3b2a14');
+    lab.position.set(l.x, y + sphereR * 6 + span * 0.03, l.z); hutGroup.add(lab);
+  });
+  scene.add(hutGroup);
   const walker = new THREE.Mesh(new THREE.SphereGeometry(sphereR * 2.2, 14, 10), new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x444444 }));
   walker.visible = false; scene.add(walker);
   const poleH = sphereR * 14;
@@ -237,7 +285,7 @@ export async function build(opts) {
     // Back to the opening framing: whole trip in view, looking north from the south.
     resetView() { camera.position.copy(home); controls.target.copy(center); controls.update(); render(); },
     cameraPos() { return { x: camera.position.x, y: camera.position.y, z: camera.position.z }; },
-    state() { return { z: blk.z, tiles: total, missing, textureTiles, vertices: gw * gh, days: dayMeshes.filter(Boolean).length, photos: photoCount, walker: walkerPos, minH, maxH,
+    state() { return { z: blk.z, tiles: total, missing, textureTiles, vertices: gw * gh, skirt: ring.length, huts: huts.length, days: dayMeshes.filter(Boolean).length, photos: photoCount, walker: walkerPos, minH, maxH,
                        segmentsDrawn: dayMeshes.map(dm => dm ? dm.mesh.geometry.instanceCount : 0), segments: dayMeshes.map(dm => dm ? dm.segments : 0) }; },
     dispose() {
       window.removeEventListener('resize', onResize);

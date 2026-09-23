@@ -124,12 +124,22 @@ absolute, so they line up with a recorded GPX taken in another time zone. It rea
   routed keep their straight line and are named in the message.
 * **Download GPX** saves one track per day, on the routed trail with
   elevation where available, plus a waypoint per photo.
+* **Huts.** **Huts from OSM** fetches every `tourism=alpine_hut` and
+  `wilderness_hut` node OpenStreetMap has inside the trip's area and keeps the
+  named ones within 1.2 km of a walked line or photo. They appear as brown
+  pins with their names on the map (tap for the altitude) and as labelled
+  pins in 3D, and are kept on the device. Rifugi that OpenStreetMap tags
+  differently (some are `tourism=hotel` or `amenity=restaurant`) will be
+  missing; tell me which and the query can be widened.
 * **3D.** The **3D** button swaps the map for a terrain view: elevation from
   the [AWS Open Data terrain tiles](https://registry.opendata.aws/terrain-tiles/)
-  (Mapzen/Tilezen Terrarium PNGs, no key), the current map background draped
-  over it (height colours if the tiles cannot be read cross-origin), one tube
-  per day, a sphere per photo, and the timeline's walker on the surface, so ▶
-  plays the walk over the mountains. One finger pans, two fingers tilt, rotate
+  (Mapzen/Tilezen Terrarium PNGs, no key), OpenTopoMap draped over it one
+  zoom level sharper than the terrain (your custom tiles if you set them;
+  height colours if tiles cannot be read cross-origin), a sky gradient, a low
+  north-western sun for relief, the block cut 250 m below its lowest point
+  with textured sides, one line per day, a sphere per photo, hut pins with
+  labels, and the timeline's walker on the surface, so ▶ plays the walk over
+  the mountains. One finger pans, two fingers tilt, rotate
   and zoom. Vertical scale is exaggerated 1.25×. The scene covers the whole
   trip at the zoom that fits it in 36 terrain tiles; the module and three.js
   (vendored under `vendor/three`, release r186) load only when the button is
@@ -262,8 +272,9 @@ fallback, request chunking, elevation gain, caching, failure), the walk
 timeline (time-to-position mapping on straight and routed days, fading,
 play and pause), recorded GPX (splitting by day, thinning, elevation from the
 file, recorded-only days, planned GPX becoming the reference), the 3D view against generated terrain
-and map tiles in software WebGL (decoding, draping, tubes, walker height, both
-fallbacks), persistence across reloads, the empty and malformed states, and the JPEG and HEIC Exif readers against fixtures it builds
+and map tiles in software WebGL (decoding, draping, skirt, lines, walker
+height, huts, both fallbacks), huts against a mocked Overpass (bounds query,
+name and distance filters, persistence), persistence across reloads, the empty and malformed states, and the JPEG and HEIC Exif readers against fixtures it builds
 byte by byte, including a HEIC whose Exif sits past the first megabyte. It
 resolves Playwright from the global npm root if it is not installed locally.
 

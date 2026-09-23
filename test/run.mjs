@@ -525,13 +525,40 @@ check((await page.locator('#days .tag').count()) === 0 && (await lines('recorded
 await page.click('#btn-clear-route');
 for (const f of [rec1, rec2, rec3]) fs.unlinkSync(f);
 
+// ---- 15. huts from OSM (mocked Overpass) ----
+console.log('15. huts near the walk');
+await page.goto(base + hash); await page.reload(); await ready();
+await page.waitForFunction(() => document.getElementById('msg2').textContent.includes('days on trails'));
+check(await page.locator('#btn-huts').isVisible(), 'huts button offered');
+let hutQuery = '';
+await page.route('**/api/interpreter', async r => {
+  hutQuery = decodeURIComponent(r.request().postData().replace(/^data=/, ''));
+  await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ elements: [
+    { type: 'node', id: 1, lat: 46.521, lon: 12.001, tags: { tourism: 'alpine_hut', name: 'Rifugio Uno', ele: '2050' } },
+    { type: 'node', id: 2, lat: 46.575, lon: 12.018, tags: { tourism: 'alpine_hut', 'name:it': 'Rifugio Due' } },
+    { type: 'node', id: 3, lat: 46.80, lon: 12.30, tags: { tourism: 'alpine_hut', name: 'Far Away Hut' } },
+    { type: 'node', id: 4, lat: 46.522, lon: 12.002, tags: { tourism: 'alpine_hut' } },
+    { type: 'way', id: 5, tags: { tourism: 'alpine_hut', name: 'A way, ignored' } }] }) });
+});
+await page.click('#btn-huts');
+await page.waitForFunction(() => /hut/.test(document.getElementById('msg').textContent) && !/Fetching/.test(document.getElementById('msg').textContent));
+check(/^\[out:json\]\[timeout:60\];node\["tourism"~"\^\(alpine_hut\|wilderness_hut\)\$"\]\(46\.\d+,11\.\d+,46\.\d+,12\.\d+\);out body;$/.test(hutQuery), `hut query over the trip bounds: ${hutQuery}`);
+check((await page.locator('#msg').innerText()) === '2 huts near the walk (3 in the area). Saved on this device.', `message: ${await page.locator('#msg').innerText()}`);
+const hl = await page.evaluate(() => window.__hike.huts().map(h => h.name + (h.ele ? ' ' + h.ele : '')));
+check(hl.join(', ') === 'Rifugio Uno 2050, Rifugio Due', `named huts within 1.2 km kept, far and nameless dropped (${hl.join(', ')})`);
+check((await page.locator('.leaflet-marker-icon.hut').count()) === 2 && (await page.locator('.hut .lbl').allInnerTexts()).join(',') === 'Rifugio Uno,Rifugio Due', 'hut markers with labels on the map');
+check((await page.locator('#btn-huts').innerText()) === 'Huts ✓ (2)', 'button shows the count');
+await page.reload(); await ready();
+check((await page.locator('.leaflet-marker-icon.hut').count()) === 2, 'huts survive a reload');
+await page.unroute('**/api/interpreter');
+
 // ---- 13. 3D terrain view (mocked terrain and map tiles) ----
 console.log('13. 3D terrain view');
 await page.goto(base + hash); await page.reload(); await ready();
 await page.waitForFunction(() => document.getElementById('msg2').textContent.includes('days on trails'));
 let demHits = 0, mapHits = 0, demMode = 'ok', mapMode = 'ok';
 await page.route('**/elevation-tiles-prod/terrarium/**', r => { demHits++; demMode === 'ok' ? r.fulfill({ contentType: 'image/png', body: DEM_PNG }) : r.fulfill({ status: 404, body: '' }); });
-await page.route('**/tile.openstreetmap.org/**', r => { mapHits++; mapMode === 'ok' ? r.fulfill({ contentType: 'image/png', body: MAP_PNG }) : r.fulfill({ status: 404, body: '' }); });
+await page.route('**/*.tile.opentopomap.org/**', r => { mapHits++; mapMode === 'ok' ? r.fulfill({ contentType: 'image/png', body: MAP_PNG }) : r.fulfill({ status: 404, body: '' }); });
 const b3 = await page.evaluate(() => window.__hike.bounds3d());
 check(b3 && b3.south < 46.52 && b3.north > 46.62 && b3.west < 12 && b3.east > 12.04, `bounds cover the photos with padding (${JSON.stringify(b3)})`);
 check(await page.locator('#btn-3d').isVisible() && (await page.locator('#btn-3d').innerText()) === '3D', '3D button offered');
@@ -543,7 +570,8 @@ check(m3.startsWith('3D: ') && !m3.includes('failed'), `3D built: ${m3}`);
 const st3 = await page.evaluate(() => window.__hike.view3d().state());
 check(st3.z === 14 && st3.tiles === demHits && st3.missing === 0 && st3.tiles <= 36, `terrain: ${st3.tiles} tiles at zoom ${st3.z}, all loaded`);
 check(st3.textureTiles > 0 && mapHits >= st3.textureTiles, `map tiles draped: ${st3.textureTiles} (requested ${mapHits})`);
-check(st3.vertices === st3.tiles / 3 * 33 * 33 || st3.vertices > 1000, `terrain mesh: ${st3.vertices} vertices`);
+check(st3.vertices > 4000 && st3.skirt > 100, `terrain mesh: ${st3.vertices} vertices, skirt ring of ${st3.skirt}`);
+check(st3.huts === 2, `2 huts in the scene (got ${st3.huts})`);
 check(st3.days === 2 && st3.photos === 5, `2 day tubes (single-photo day has no line), 5 photo spheres (got ${st3.days}, ${st3.photos})`);
 const hAt = await page.evaluate(() => window.__hike.view3d().heightAt(46.55, 12.01));
 check(near(hAt, 1500, 0.01), `elevation decoded from terrarium: ${hAt} m`);
@@ -580,7 +608,8 @@ demMode = '404'; mapMode = 'ok';
 await page.click('#btn-3d');
 await page.waitForFunction(() => /failed/.test(document.getElementById('msg').textContent) || document.getElementById('btn-3d').textContent === 'Map', null, { timeout: 120000 });
 check((await page.locator('#msg').innerText()).includes('3D view failed: no terrain tiles') && await page.locator('#map').isVisible() && await page.locator('#btn-3d').isEnabled(), 'no terrain: failure named, map restored');
-await page.unroute('**/elevation-tiles-prod/terrarium/**'); await page.unroute('**/tile.openstreetmap.org/**');
+await page.unroute('**/elevation-tiles-prod/terrarium/**'); await page.unroute('**/*.tile.opentopomap.org/**');
+await page.evaluate(() => localStorage.removeItem('hike-map.huts.v1'));
 demMode = 'ok';
 
 // ---- 14. centre on the map ----
@@ -589,10 +618,7 @@ await page.goto(base + hash); await page.reload(); await ready();
 const c0 = await page.evaluate(() => window.__hike.mapCenter());
 await page.evaluate(() => { const m = document.getElementById('map'); m.dispatchEvent(new Event('x')); });
 await page.evaluate(() => window.__hike.setTimeline(10000));
-const box2 = await page.locator('#map').boundingBox();
-await page.mouse.move(box2.x + box2.width / 2, box2.y + box2.height / 2);
-await page.mouse.down(); await page.mouse.move(box2.x + box2.width / 2 - 150, box2.y + box2.height / 2 - 100, { steps: 8 }); await page.mouse.up();
-await page.waitForTimeout(300);
+await page.evaluate(() => window.__hike.panMap(300, 200));      // a synthetic mouse drag proved timing-sensitive here
 const c1 = await page.evaluate(() => window.__hike.mapCenter());
 check(Math.abs(c1.lat - c0.lat) > 1e-3 || Math.abs(c1.lon - c0.lon) > 1e-3, `map dragged away (${c1.lat.toFixed(3)}, ${c1.lon.toFixed(3)})`);
 await page.click('#btn-center');
