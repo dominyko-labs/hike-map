@@ -56,6 +56,15 @@
   #btn-play { width: 40px; height: 36px; padding: 0; flex: 0 0 auto; font-size: 15px; }
   #tl { flex: 1 1 auto; width: 100%; min-width: 0; accent-color: var(--accent); height: 28px; margin: 0; }
   #tl-label { color: var(--muted); font-size: 13px; min-height: 1.2em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  #profile { position: relative; margin: 6px 0 8px; }
+  #profile-svg { display: block; width: 100%; height: 150px; touch-action: none; cursor: crosshair; }
+  #profile-svg .grid { stroke: var(--line); stroke-width: 1; }
+  #profile-svg .axis { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  #profile-svg .dlabel { fill: var(--muted); font-size: 11px; font-weight: 600; text-anchor: middle; }
+  #profile-svg .cursor { stroke: var(--ink); stroke-width: 1; opacity: .6; }
+  #profile-svg .cursor-dot { fill: var(--panel); stroke: var(--ink); stroke-width: 2; }
+  #profile-tip { position: absolute; top: 4px; right: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font-size: 12px; color: var(--ink); pointer-events: none; font-variant-numeric: tabular-nums; }
+  #profile-tip b { font-weight: 600; }
   .walker { stroke: var(--panel); }
   #days { list-style: none; margin: 0 0 4px; padding: 0; font-size: 14px; }
   #days li { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); cursor: pointer; }
@@ -100,6 +109,10 @@
     </div>
     <div id="tl-label"></div>
   </div>
+  <div id="profile" class="hidden">
+    <svg id="profile-svg" role="img" aria-label="Elevation profile of the walk"></svg>
+    <div id="profile-tip" class="hidden"></div>
+  </div>
   <ul id="days" class="hidden"></ul>
   <div id="empty">
     <p>In Photos select the trip, Share, Options, turn <b>Location</b> on, Save to Files. Then <b>Pick photos</b> below and choose them from Files (Browse, not Photo Library). One colour per day.</p>
@@ -139,7 +152,8 @@
   var AV1_RELATION = 177743;                  // "Alta via n. 1 delle Dolomiti - Dolomiten-Höhenweg Nr. 1" on openstreetmap.org
   var AV1_BBOX = '46.0,11.7,46.9,12.4';       // south,west,north,east: the Dolomites between Braies and Belluno
   var DOLOMITES = [46.45, 12.05];
-  var DAY_COLORS = ['#2a9d8f', '#e76f51', '#8e7cc3', '#d64f8a', '#3d8fd1', '#c9a227', '#26a69a', '#a0522d', '#5c6bc0', '#7cb342'];
+  // Ten fixed day hues, validated for colour-vision separation on both the light and the dark surface.
+  var DAY_COLORS = ['#2a9d8f', '#dc5f41', '#8e7cc3', '#d64f8a', '#3d8fd1', '#b3901c', '#26a69a', '#a0522d', '#5c6bc0', '#679a33'];
   var STORE_KEY = 'hike-map.route.v1';
   var TRAILS_KEY = 'hike-map.trails.v1';
   var REC_KEY = 'hike-map.recorded.v1';
@@ -1088,7 +1102,8 @@
       tlTotal += dur;
     });
     $('timeline').classList.toggle('hidden', !tlDays.length);
-    if (!tlDays.length) { stopPlay(); progressLayer.clearLayers(); return; }
+    if (!tlDays.length) { stopPlay(); progressLayer.clearLayers(); $('profile').classList.add('hidden'); prof = null; return; }
+    renderProfile();
     applyTimeline(+$('tl').value);
   }
   // Slider value -> {day, t, lat, lon, ele, km}
@@ -1118,6 +1133,7 @@
       var reached = atEnd || r.day < pos.day.gi || (r.day === pos.day.gi && (isNaN(r.t) || r.t <= pos.t));
       r.m.setStyle({ opacity: reached ? 1 : .25, fillOpacity: reached ? 1 : .25 });
     });
+    updateProfileMarker(pos, atEnd);
     if (atEnd) { $('tl-label').textContent = ''; if (view3d) view3d.setProgress(null); return; }
     var g = dayGroups[pos.day.gi], path = pos.day.path;
     if (view3d) view3d.setProgress({ day: pos.day.gi, frac: (pos.index + pos.frac) / Math.max(1, path.length - 1), lat: pos.lat, lon: pos.lon });
@@ -1130,6 +1146,121 @@
       ' · ' + pos.km.toFixed(1) + ' km' + (isFinite(pos.ele) ? ' · ' + Math.round(pos.ele) + ' m' : '');
     if (playing && !map.getBounds().pad(-0.2).contains([pos.lat, pos.lon])) map.panTo([pos.lat, pos.lon]);
   }
+  // ---------- elevation profile: altitude over distance, all days in order, synced with the timeline ----------
+  var prof = null;   // {x0, x1, y0, y1, W, H, totalKm, minE, maxE, days: [{tl, kmStart, km}]}
+  function svgEl(tag, attrs, parent) {
+    var el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    Object.keys(attrs || {}).forEach(function (k) { el.setAttribute(k, attrs[k]); });
+    if (parent) parent.appendChild(el);
+    return el;
+  }
+  function niceStep(range, target) {
+    var raw = range / Math.max(1, target), pow = Math.pow(10, Math.floor(Math.log10(raw))), steps = [1, 2, 2.5, 5, 10];
+    for (var i = 0; i < steps.length; i++) if (steps[i] * pow >= raw) return steps[i] * pow;
+    return 10 * pow;
+  }
+  function renderProfile() {
+    var box = $('profile'), svg = $('profile-svg');
+    var withEle = tlDays.filter(function (d) { return d.path.some(function (p) { return isFinite(p.ele); }); });
+    if (!withEle.length) { box.classList.add('hidden'); prof = null; return; }
+    box.classList.remove('hidden');
+    var W = Math.max(200, box.clientWidth || 320), H = 150, x0 = 38, x1 = W - 10, y0 = 22, y1 = H - 20;
+    var kmStart = 0, days = [], minE = Infinity, maxE = -Infinity;
+    tlDays.forEach(function (d) {
+      var km = d.path[d.path.length - 1].d;
+      days.push({ tl: d, kmStart: kmStart, km: km });
+      d.path.forEach(function (p) { if (isFinite(p.ele)) { if (p.ele < minE) minE = p.ele; if (p.ele > maxE) maxE = p.ele; } });
+      kmStart += km;
+    });
+    var totalKm = kmStart || 1, pad = Math.max(50, (maxE - minE) * 0.08);
+    minE = Math.floor((minE - pad) / 50) * 50; maxE = Math.ceil((maxE + pad) / 50) * 50;
+    prof = { x0: x0, x1: x1, y0: y0, y1: y1, W: W, H: H, totalKm: totalKm, minE: minE, maxE: maxE, days: days };
+    var X = function (km) { return x0 + (x1 - x0) * km / totalKm; }, Y = function (e) { return y1 - (y1 - y0) * (e - minE) / (maxE - minE); };
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    // grid and axes
+    var yStep = niceStep(maxE - minE, 4);
+    for (var e = Math.ceil(minE / yStep) * yStep; e <= maxE; e += yStep) {
+      svgEl('line', { x1: x0, x2: x1, y1: Y(e), y2: Y(e), 'class': 'grid' }, svg);
+      svgEl('text', { x: x0 - 4, y: Y(e) + 4, 'text-anchor': 'end', 'class': 'axis' }, svg).textContent = e;
+    }
+    var xStep = niceStep(totalKm, 5);
+    for (var k = 0; k <= totalKm; k += xStep) {
+      svgEl('line', { x1: X(k), x2: X(k), y1: y1, y2: y1 + 4, 'class': 'grid' }, svg);
+      svgEl('text', { x: X(k), y: H - 5, 'text-anchor': 'middle', 'class': 'axis' }, svg).textContent = k + (k === 0 ? ' km' : '');
+    }
+    // days: a wash and a 2px line; the same drawn again above, clipped to the walked distance
+    var defs = svgEl('defs', {}, svg);
+    var clip = svgEl('clipPath', { id: 'p-clip' }, defs);
+    var clipRect = svgEl('rect', { id: 'p-clip-rect', x: 0, y: 0, width: 0, height: H }, clip);
+    var faded = svgEl('g', { id: 'p-faded', opacity: 1 }, svg), walked = svgEl('g', { 'clip-path': 'url(#p-clip)' }, svg);
+    days.forEach(function (d, i) {
+      var g = dayGroups[d.tl.gi], pts = d.tl.path.filter(function (p) { return isFinite(p.ele); });
+      var spanPx = Math.max(1, X(d.km) - X(0)), stride = Math.max(1, Math.floor(pts.length / (spanPx * 2)));
+      var line = '', first = true;
+      for (var j = 0; j < pts.length; j += stride) { var p = pts[j]; line += (first ? 'M' : 'L') + X(d.kmStart + p.d).toFixed(1) + ' ' + Y(p.ele).toFixed(1); first = false; }
+      var lastP = pts[pts.length - 1];
+      if ((pts.length - 1) % stride) line += 'L' + X(d.kmStart + lastP.d).toFixed(1) + ' ' + Y(lastP.ele).toFixed(1);
+      if (!line) return;
+      var area = line + 'L' + X(d.kmStart + lastP.d).toFixed(1) + ' ' + y1 + 'L' + X(d.kmStart + pts[0].d).toFixed(1) + ' ' + y1 + 'Z';
+      [faded, walked].forEach(function (grp) {
+        svgEl('path', { d: area, fill: g.color, 'fill-opacity': 0.12, stroke: 'none' }, grp);
+        svgEl('path', { d: line, fill: 'none', stroke: g.color, 'stroke-width': 2, 'stroke-linejoin': 'round', 'class': 'p-line' }, grp);
+      });
+      var cx = X(d.kmStart + d.km / 2);
+      if (X(d.km) - X(0) > 14) {
+        svgEl('text', { x: cx, y: 12, 'class': 'dlabel' }, svg).textContent = String(d.tl.gi + 1);
+        svgEl('line', { x1: cx - 6, x2: cx + 6, y1: 15, y2: 15, stroke: g.color, 'stroke-width': 2 }, svg);
+      }
+    });
+    svgEl('line', { id: 'p-cursor', x1: 0, x2: 0, y1: y0, y2: y1, 'class': 'cursor', visibility: 'hidden' }, svg);
+    svgEl('circle', { id: 'p-dot', cx: 0, cy: 0, r: 5, 'class': 'cursor-dot', visibility: 'hidden' }, svg);
+    updateProfileMarker(timelineAt(+$('tl').value), +$('tl').value >= TL_MAX);
+  }
+  function profileX(pos) {
+    if (!prof || !pos) return null;
+    for (var i = 0; i < prof.days.length; i++) if (prof.days[i].tl === pos.day) return prof.x0 + (prof.x1 - prof.x0) * (prof.days[i].kmStart + pos.km) / prof.totalKm;
+    return null;
+  }
+  function updateProfileMarker(pos, atEnd) {
+    if (!prof) return;
+    var cur = $('p-cursor'), dot = $('p-dot'), rect = $('p-clip-rect'), faded = $('p-faded');
+    if (atEnd || !pos) { cur.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); rect.setAttribute('width', 0); faded.setAttribute('opacity', 1); return; }
+    var x = profileX(pos);
+    if (x === null) return;
+    faded.setAttribute('opacity', 0.3);
+    rect.setAttribute('width', x);
+    cur.setAttribute('x1', x); cur.setAttribute('x2', x); cur.setAttribute('visibility', 'visible');
+    if (isFinite(pos.ele)) { dot.setAttribute('cx', x); dot.setAttribute('cy', prof.y1 - (prof.y1 - prof.y0) * (pos.ele - prof.minE) / (prof.maxE - prof.minE)); dot.setAttribute('visibility', 'visible'); }
+    else dot.setAttribute('visibility', 'hidden');
+  }
+  // A chart x (px) -> slider value, by distance along the day that owns it
+  function profileScrubValue(px) {
+    if (!prof) return null;
+    var km = Math.max(0, Math.min(prof.totalKm, (px - prof.x0) / (prof.x1 - prof.x0) * prof.totalKm));
+    var d = prof.days[prof.days.length - 1];
+    for (var i = 0; i < prof.days.length; i++) if (km <= prof.days[i].kmStart + prof.days[i].km) { d = prof.days[i]; break; }
+    var within = km - d.kmStart, path = d.tl.path, j = 0;
+    while (j < path.length - 1 && path[j + 1].d < within) j++;
+    var a = path[j], b = path[Math.min(path.length - 1, j + 1)];
+    var f = b.d > a.d ? (within - a.d) / (b.d - a.d) : 0, t = a.t + (b.t - a.t) * Math.max(0, Math.min(1, f));
+    return Math.min(TL_MAX - 1, Math.max(0, (d.tl.offset + (t - d.tl.t0)) / tlTotal * TL_MAX));
+  }
+  function profilePointer(ev, scrub) {
+    if (!prof) return;
+    var r = $('profile-svg').getBoundingClientRect(), px = (ev.clientX - r.left) * prof.W / r.width;
+    var v = profileScrubValue(px);
+    if (v === null) return;
+    var pos = timelineAt(v);
+    if (!pos) return;
+    var tip = $('profile-tip');
+    tip.textContent = '';
+    var b = document.createElement('b'); b.textContent = (isFinite(pos.ele) ? Math.round(pos.ele) + ' m' : '–');
+    tip.appendChild(b); tip.appendChild(document.createTextNode(' · day ' + (pos.day.gi + 1) + ' · ' + pos.km.toFixed(1) + ' km'));
+    tip.classList.remove('hidden');
+    if (scrub) { stopPlay(); $('tl').value = v; applyTimeline(v); }
+  }
+
   function stopPlay() {
     playing = false;
     if (playHandle) { cancelAnimationFrame(playHandle); playHandle = null; }
@@ -1401,6 +1532,15 @@
   $('btn-trails').addEventListener('click', routeAllDays);
   $('tl').addEventListener('input', function () { stopPlay(); applyTimeline(+this.value); });
   $('btn-play').addEventListener('click', togglePlay);
+  (function () {
+    var svg = $('profile-svg'), down = false;
+    svg.addEventListener('pointerdown', function (ev) { down = true; svg.setPointerCapture(ev.pointerId); profilePointer(ev, true); ev.preventDefault(); });
+    svg.addEventListener('pointermove', function (ev) { profilePointer(ev, down); });
+    svg.addEventListener('pointerup', function () { down = false; });
+    svg.addEventListener('pointercancel', function () { down = false; });
+    svg.addEventListener('pointerleave', function () { if (!down) $('profile-tip').classList.add('hidden'); });
+    window.addEventListener('resize', function () { if (tlDays.length) renderProfile(); });
+  })();
   $('btn-3d').addEventListener('click', function () { if (view3d) exit3d(); else enter3d(); });
   $('btn-center').addEventListener('click', centerView);
   $('btn-huts').addEventListener('click', fetchHuts);
@@ -1416,6 +1556,8 @@
     elevationGain: elevationGain, dayWaypoints: dayWaypoints,
     timelineAt: function (v) { var p = timelineAt(v); return p && { day: p.day.gi, t: p.t, lat: p.lat, lon: p.lon, ele: p.ele, km: p.km }; },
     timelineTotal: function () { return tlTotal; },
+    profile: function () { return prof && { totalKm: prof.totalKm, minE: prof.minE, maxE: prof.maxE, days: prof.days.map(function (d) { return { day: d.tl.gi, kmStart: d.kmStart, km: d.km }; }), x0: prof.x0, x1: prof.x1, W: prof.W }; },
+    profileScrubValue: profileScrubValue,
     setTimeline: function (v) { $('tl').value = v; applyTimeline(v); },
     route: function () { return route; },
     gpx: gpx, shareLink: shareLink, totalKm: totalKm, parsePointList: parsePointList, exifGps: exifGps,

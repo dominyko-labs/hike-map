@@ -664,6 +664,47 @@ await page.click('#btn-clear-rec');
 fs.unlinkSync(rec4);
 await page.evaluate(() => localStorage.removeItem('hike-map.trails.v1'));
 
+// ---- 16. elevation profile synced with the timeline ----
+console.log('16. elevation profile');
+await page.route('**/brouter?*', async r => {
+  const u = new URL(r.request().url()), lonlats = u.searchParams.get('lonlats').split('|');
+  const [lon0, lat0] = lonlats[0].split(',').map(Number), [lon1, lat1] = lonlats[lonlats.length - 1].split(',').map(Number);
+  const coords = ELE.map((e, i) => [lon0 + (lon1 - lon0) * i / 7, lat0 + (lat1 - lat0) * i / 7, e]);
+  await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } }] }) });
+});
+await page.evaluate(() => localStorage.removeItem('hike-map.trails.v1'));
+await page.goto(base + hash); await page.reload(); await ready();
+await page.waitForFunction(() => /days on trails/.test(document.getElementById('msg2').textContent) && !/Routing/.test(document.getElementById('msg2').textContent));
+await page.evaluate(() => window.__hike.setTimeline(10000));
+check(await page.locator('#profile').isVisible(), 'profile shown once days have elevation');
+const pr = await page.evaluate(() => window.__hike.profile());
+const km1 = pathKm([[46.52, 12], [46.55, 12.01]]), km2 = pathKm([[46.58, 12.02], [46.6, 12.03]]);
+check(pr.days.length === 3 && near(pr.days[0].km, km1, 1e-6) && near(pr.days[1].kmStart, km1, 1e-6) && near(pr.totalKm, km1 + km2, 1e-6), `x axis is cumulative distance over the days (${pr.totalKm.toFixed(2)} km)`);
+check(pr.minE <= 1000 && pr.maxE >= 1050 && (pr.maxE - pr.minE) <= 400, `y axis spans the elevations with padding (${pr.minE}–${pr.maxE} m)`);
+check((await page.locator('#profile-svg path.p-line').count()) === 4 && (await page.locator('#profile-svg .dlabel').allTextContents()).join(',') === '1,2', `two day lines (faded and walked layers), day labels (${await page.locator('#profile-svg path.p-line').count()} lines, labels ${(await page.locator('#profile-svg .dlabel').allTextContents()).join(',')})`);
+check((await page.locator('#p-cursor').getAttribute('visibility')) === 'hidden' && (await page.locator('#p-faded').getAttribute('opacity')) === '1', 'no cursor at the end, nothing faded');
+await page.evaluate(v => window.__hike.setTimeline(v), v30);
+const xExp = pr.x0 + (pr.x1 - pr.x0) * (km1 / 2) / pr.totalKm;
+const cur = await page.evaluate(() => ({ v: document.getElementById('p-cursor').getAttribute('visibility'), x: +document.getElementById('p-cursor').getAttribute('x1'), dot: document.getElementById('p-dot').getAttribute('visibility'), clip: +document.getElementById('p-clip-rect').getAttribute('width'), faded: document.getElementById('p-faded').getAttribute('opacity') }));
+check(cur.v === 'visible' && near(cur.x, xExp, 1) && cur.dot === 'visible' && near(cur.clip, xExp, 1) && cur.faded === '0.3', `cursor half-way along day 1 at x=${cur.x.toFixed(1)} (expected ${xExp.toFixed(1)}), walked part clipped, rest faded`);
+// scrubbing: a pointer at the middle of day 2 moves the timeline there
+const xMid2 = pr.x0 + (pr.x1 - pr.x0) * (km1 + km2 / 2) / pr.totalKm;
+const vScrub = await page.evaluate(x => window.__hike.profileScrubValue(x), xMid2);
+const pScrub = await page.evaluate(v => window.__hike.timelineAt(v), vScrub);
+check(pScrub.day === 1 && near(pScrub.km, km2 / 2, 0.02), `chart x -> timeline: day ${pScrub.day + 1}, ${pScrub.km.toFixed(2)} km of ${km2.toFixed(2)}`);
+const rect = await page.locator('#profile-svg').boundingBox();
+await page.mouse.move(rect.x + xMid2 * rect.width / pr.W, rect.y + rect.height / 2);
+await page.mouse.down(); await page.mouse.up();
+check(Math.abs(+(await page.locator('#tl').inputValue()) - vScrub) <= 2, `tap on the chart scrubs the slider (${await page.locator('#tl').inputValue()} vs ${Math.round(vScrub)})`);
+check(/day 2 · \d+\.\d km/.test(await page.locator('#profile-tip').innerText()) && (await page.locator('#tl-label').innerText()).startsWith('Day 2'), `tooltip and label follow: ${await page.locator('#profile-tip').innerText()}`);
+await page.evaluate(() => window.__hike.setTimeline(10000));
+await page.unroute('**/brouter?*');
+await page.route('**/brouter?*', r => r.fulfill({ status: 503, body: 'mock: routing off' }));
+await page.evaluate(() => localStorage.removeItem('hike-map.trails.v1'));
+await page.reload(); await ready();
+await page.waitForFunction(() => /days on trails/.test(document.getElementById('msg2').textContent));
+check(await page.locator('#profile').isHidden(), 'no elevation anywhere: profile hidden');
+
 // ---- 9. tiles toggle and layout ----
 console.log('9. tiles and layout');
 check((await page.locator('#btn-tiles').innerText()) === 'Map: Street', 'starts on street tiles');

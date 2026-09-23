@@ -157,6 +157,15 @@ absolute, so they line up with a recorded GPX taken in another time zone. It rea
   first pressed. **Map** returns to the 2D view. **Centre** brings the whole
   trip back into view in either mode (the map refits its bounds, the 3D
   camera returns to its opening position).
+* **Elevation profile.** Under the slider, a chart of altitude over distance
+  for the whole trip, days in order and in their colours, with the day number
+  above each span. It is tied to the timeline both ways: the walker's position
+  is a hairline and a dot on the profile, the walked part is drawn in full and
+  the rest faded, and tapping or dragging on the chart moves the timeline
+  there (the map, the 3D walker and the label follow). A readout in the
+  corner gives altitude, day and distance under the pointer. The chart shows
+  only days that carry elevation (recorded or routed) and hides itself when
+  none does.
 * **Walk timeline.** The slider above the day list runs over the trip's
   walking time (the days back to back, nights skipped). Drag it and the map
   shows the walk up to that moment: the trail drawn so far in the day's
@@ -281,7 +290,8 @@ a file, from `routes/` and from a mocked Overpass response (including the
 failure path), off-route detection, trail routing against a mocked BRouter (profile
 fallback, request chunking, elevation gain, caching, failure), the walk
 timeline (time-to-position mapping on straight and routed days, fading,
-play and pause), recorded GPX (splitting by day, thinning, elevation from the
+play and pause), the elevation profile (axes, day spans, cursor sync,
+scrubbing by pointer), recorded GPX (splitting by day, thinning, elevation from the
 file, recorded-only days, planned GPX becoming the reference), the 3D view against generated terrain
 and map tiles in software WebGL (decoding, draping, skirt, lines, walker
 height, huts, both fallbacks), huts against a mocked Overpass (bounds query,
