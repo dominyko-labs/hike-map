@@ -78,6 +78,12 @@
   #empty p { margin: 6px 0; }
   #msg { color: var(--muted); font-size: 14px; margin: 8px 0 0; min-height: 1.2em; }
   #msg.err, #msg2.err { color: var(--danger); }
+  #progress { margin: 10px 0 2px; }
+  #progress .pbar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+  #pfill { height: 100%; width: 0; background: var(--accent); border-radius: 4px; transition: width .15s linear; }
+  #progress.busy #pfill { width: 30% !important; animation: pslide 1.2s ease-in-out infinite; }
+  @keyframes pslide { 0% { margin-left: 0; } 50% { margin-left: 70%; } 100% { margin-left: 0; } }
+  #plabel { color: var(--muted); font-size: 13px; margin-top: 4px; font-variant-numeric: tabular-nums; }
   #msg2 { color: var(--muted); font-size: 14px; margin: 4px 0 0; min-height: 0; }
   .hidden { display: none !important; }
   .leaflet-container { font: inherit; }
@@ -140,6 +146,10 @@
     <button id="btn-tiles" type="button">Map: Street</button>
     <button id="btn-3d" class="hidden" type="button">3D</button>
     <button id="btn-center" class="hidden" type="button">Centre</button>
+  </div>
+  <div id="progress" class="hidden" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+    <div class="pbar"><div id="pfill"></div></div>
+    <div id="plabel"></div>
   </div>
   <p id="msg" role="status" aria-live="polite"></p>
   <p id="msg2" role="status" aria-live="polite"></p>
@@ -668,6 +678,18 @@
   function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
   function setMsg(s, isErr) { $('msg').textContent = s || ''; $('msg').classList.toggle('err', !!isErr); }
   function setMsg2(s, isErr) { $('msg2').textContent = s || ''; $('msg2').classList.toggle('err', !!isErr); }
+  // The progress bar: a fraction when the total is known, a sliding bar when it is not.
+  function showProgress(label, done, total) {
+    var box = $('progress');
+    box.classList.remove('hidden');
+    var known = total > 0 && isFinite(total);
+    box.classList.toggle('busy', !known);
+    var pct = known ? Math.max(0, Math.min(100, Math.round(done / total * 100))) : 0;
+    $('pfill').style.width = known ? pct + '%' : '30%';
+    box.setAttribute('aria-valuenow', pct);
+    $('plabel').textContent = label + (known ? ' · ' + done + ' of ' + total + ' · ' + pct + '%' : '');
+  }
+  function hideProgress() { $('progress').classList.add('hidden'); $('progress').classList.remove('busy'); $('pfill').style.width = '0'; }
 
   function initMap() {
     map = L.map('map', { zoomControl: true });
@@ -1026,6 +1048,7 @@
   }
   function loadRecordedFiles(files) {
     var summary = [], asRoute = null, done = 0;
+    showProgress('Reading ' + files.length + ' GPX file' + (files.length === 1 ? '' : 's'), 0, 0);
     files.forEach(function (f) {
       var rd = new FileReader();
       rd.onload = function () {
@@ -1046,6 +1069,7 @@
     });
     function finish() {
       if (++done < files.length) return;
+      hideProgress();
       var stored = saveRecorded();
       if (asRoute) setRoute(asRoute, true);
       render();
@@ -1329,14 +1353,17 @@
     import('./view3d.js').then(function (m) {
       $('map').classList.add('hidden');
       $('map3d').classList.remove('hidden');
-      return m.build({ container: $('map3d'), bounds: b, days: days, links: links.map(function (l) { return l.coords.map(function (c) { return [c[0], c[1]]; }); }), huts: huts, textureUrl: texUrl, onProgress: setMsg });
+      return m.build({ container: $('map3d'), bounds: b, days: days, links: links.map(function (l) { return l.coords.map(function (c) { return [c[0], c[1]]; }); }), huts: huts, textureUrl: texUrl,
+        onProgress: function (text, done, total) { if (total) showProgress(text, done, total); else showProgress(text, 0, 0); } });
     }).then(function (v) {
+      hideProgress();
       view3d = v;
       var st = v.state();
       setMsg('3D: ' + st.tiles + ' terrain tiles at zoom ' + st.z + (st.textureTiles ? '' : ', map tiles unavailable, height colours instead') + '. Drag to pan, two fingers to tilt and zoom.');
       $('btn-3d').textContent = 'Map';
       applyTimeline(+$('tl').value);
     }).catch(function (e) {
+      hideProgress();
       $('map3d').classList.add('hidden');
       $('map').classList.remove('hidden');
       map.invalidateSize();
@@ -1431,15 +1458,19 @@
         if (!trails[key]) todo.push({ label: 'between day ' + (i + 1) + ' and ' + (i + 2), key: key, wps: [ends.last, starts.first] });
       }
     };
+    var routed = 0;
     var runQueue = function () {
       if (!todo.length) return Promise.resolve();
       var job = todo.shift();
       setMsg2('Routing ' + job.label + ' along trails…');
+      showProgress('Routing along trails', routed, routed + todo.length + 1);
+      routed++;
       return routeWaypoints(job.wps).then(function (t) {
         if (t) { trails[job.key] = t; saveTrails(); done++; render(); }
       }).catch(function (e) { failed.push(job.label + ' (' + e.message + ')'); }).then(runQueue);
     };
     runQueue().then(function () { queueLinks(); return runQueue(); }).then(function () {
+      hideProgress();
       routing = false;
       $('btn-trails').disabled = false;
       render();
@@ -1494,17 +1525,22 @@
   function onFiles(fileList) {
     var files = Array.prototype.slice.call(fileList);
     if (!files.length) return;
-    var total = files.length, added = 0, none = 0, done = 0;
-    setMsg('Reading 1 of ' + total + '…');
+    var total = files.length, added = 0, none = 0, done = 0, next = 0, lastDraw = Date.now();
+    showProgress('Reading photos', 0, total);
+    setMsg('');
     $('files').disabled = true;
-    files.reduce(function (chain, f) {
-      return chain.then(function () { return readGps(f); }).then(function (g) {
+    var worker = function () {                 // a few files in flight at once: the file provider is the slow part
+      if (next >= total) return Promise.resolve();
+      var f = files[next++];
+      return readGps(f).then(function (g) {
         if (g) { points.push(g); added++; } else { none++; }
         done++;
-        if (done < total) setMsg('Reading ' + (done + 1) + ' of ' + total + '… ' + added + ' with GPS so far');
-        if (done % 25 === 0 && done < total) render();      // draw as it goes, so hundreds of photos show progress on the map
-      });
-    }, Promise.resolve()).then(function () {
+        showProgress('Reading photos · ' + added + ' with GPS', done, total);
+        if (done < total && Date.now() - lastDraw > 2000) { lastDraw = Date.now(); render(); }   // draw as it goes, not on every file
+      }).then(worker);
+    };
+    Promise.all([worker(), worker(), worker(), worker()]).then(function () {
+      hideProgress();
       skipped += none;
       render();
       setMsg(added + ' added' + (none ? ', ' + none + ' without GPS (pick from Files with Location kept on, not from the Photo Library, which strips it)' : '') + '.');
@@ -1565,7 +1601,8 @@
     links: function () { return links.map(function (l) { return { from: l.from, to: l.to, n: l.coords.length, km: l.km }; }); },
     thinTrack: thinTrack, recordedKm: recordedKm, smoothElevation: smoothElevation,
     tileMode: function () { return TILE_MODES[tileMode].name; }, setCustomTiles: function (u) { localStorage.setItem(CUSTOM_TILES_KEY, u); },
-    view3d: function () { return view3d; }, bounds3d: bounds3d, huts: function () { return huts; }, parseHuts: parseHuts, mapCenter: function () { var c = map.getCenter(); return { lat: c.lat, lon: c.lng, zoom: map.getZoom() }; }, setZoom: function (z) { map.setZoom(z, { animate: false }); }, panMap: function (dx, dy) { map.panBy([dx, dy], { animate: false }); },
+    view3d: function () { return view3d; }, bounds3d: bounds3d, huts: function () { return huts; }, parseHuts: parseHuts,
+    progress: function () { var b = $('progress'); return { shown: !b.classList.contains('hidden'), busy: b.classList.contains('busy'), label: $('plabel').textContent, width: $('pfill').style.width }; }, mapCenter: function () { var c = map.getCenter(); return { lat: c.lat, lon: c.lng, zoom: map.getZoom() }; }, setZoom: function (z) { map.setZoom(z, { animate: false }); }, panMap: function (dx, dy) { map.panBy([dx, dy], { animate: false }); },
     elevationGain: elevationGain, dayWaypoints: dayWaypoints,
     timelineAt: function (v) { var p = timelineAt(v); return p && { day: p.day.gi, t: p.t, lat: p.lat, lon: p.lon, ele: p.ele, km: p.km }; },
     timelineTotal: function () { return tlTotal; },

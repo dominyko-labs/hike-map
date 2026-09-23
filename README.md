@@ -30,7 +30,13 @@ if you like; the link is all the page needs.
 
 The page reads the Exif block directly from JPEG and HEIC files, in the
 browser. When the camera wrote its UTC offset (iPhones do), photo times are
-absolute, so they line up with a recorded GPX taken in another time zone. It reads a few hundred KB per photo, shows "Reading N of M" as it goes and draws every 25 photos, so a few hundred photos take well under a minute once iOS has handed them over. Save the copies to On My iPhone rather than iCloud Drive: iCloud copies may have to download first, and that is the slow, silent part.
+absolute, so they line up with a recorded GPX taken in another time zone. It
+reads a few hundred KB per photo, four files at a time, shows a progress bar
+with the count, and redraws the map every couple of seconds, so a thousand
+photos take a few minutes at most once iOS has handed them over. The same bar
+reports GPX parsing, trail routing and 3D tile loading. Save the copies to On
+My iPhone rather than iCloud Drive: iCloud copies may have to download first,
+and that is the slow, silent part.
 
 ## What the page shows
 

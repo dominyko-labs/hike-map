@@ -59,7 +59,7 @@ export async function build(opts) {
     return loadImage(tileUrl(TERRAIN_URL, blk.z, tx, ty))
       .then(img => demCtx.drawImage(img, (tx - blk.x0) * TILE, (ty - blk.y0) * TILE))
       .catch(() => { missing++; })
-      .then(() => onProgress('3D: terrain tile ' + (++done) + ' of ' + total));
+      .then(() => onProgress('3D: terrain tiles', ++done, total));
   }));
   if (missing === total) throw new Error('no terrain tiles could be loaded');
   const px = demCtx.getImageData(0, 0, W, H).data;
@@ -135,8 +135,9 @@ export async function build(opts) {
     for (let ty = blk.y0 * scale; ty < (blk.y0 + blk.ny) * scale; ty++) for (let tx = blk.x0 * scale; tx < (blk.x0 + blk.nx) * scale; tx++) {
       jobs.push(loadImage(tileUrl(textureUrl, tz, tx, ty)).then(img => { tctx.drawImage(img, (tx - blk.x0 * scale) * TILE, (ty - blk.y0 * scale) * TILE); textureTiles++; }).catch(() => {}));
     }
-    onProgress('3D: map tiles…');
-    await Promise.all(jobs);
+    let texDone = 0;
+    onProgress('3D: map tiles', 0, jobs.length);
+    await Promise.all(jobs.map(j => j.then(() => onProgress('3D: map tiles', ++texDone, jobs.length))));
     if (!textureTiles) throw new Error('no map tiles');
     tctx.getImageData(0, 0, 1, 1);                       // throws when a tile tainted the canvas
     const tex = new THREE.CanvasTexture(tc);
