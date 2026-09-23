@@ -195,7 +195,8 @@ export async function build(opts) {
   container.appendChild(renderer.domElement);
   const camera = new THREE.PerspectiveCamera(55, container.clientWidth / Math.max(1, container.clientHeight), 10, span * 6);
   const center = new THREE.Vector3(0, ((minH + maxH) / 2) * EXAG, 0);
-  camera.position.set(center.x, center.y + span * 0.55, center.z + span * 0.8);
+  const home = new THREE.Vector3(center.x, center.y + span * 0.55, center.z + span * 0.8);
+  camera.position.copy(home);
   const controls = new MapControls(camera, renderer.domElement);
   controls.target.copy(center);
   controls.enableDamping = false;
@@ -233,6 +234,9 @@ export async function build(opts) {
       render();
     },
     heightAt,
+    // Back to the opening framing: whole trip in view, looking north from the south.
+    resetView() { camera.position.copy(home); controls.target.copy(center); controls.update(); render(); },
+    cameraPos() { return { x: camera.position.x, y: camera.position.y, z: camera.position.z }; },
     state() { return { z: blk.z, tiles: total, missing, textureTiles, vertices: gw * gh, days: dayMeshes.filter(Boolean).length, photos: photoCount, walker: walkerPos, minH, maxH,
                        segmentsDrawn: dayMeshes.map(dm => dm ? dm.mesh.geometry.instanceCount : 0), segments: dayMeshes.map(dm => dm ? dm.segments : 0) }; },
     dispose() {

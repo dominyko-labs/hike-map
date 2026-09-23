@@ -117,6 +117,7 @@
     <button id="btn-clear-route" class="hidden" type="button">Clear route</button>
     <button id="btn-tiles" type="button">Map: Street</button>
     <button id="btn-3d" class="hidden" type="button">3D</button>
+    <button id="btn-center" class="hidden" type="button">Centre</button>
   </div>
   <p id="msg" role="status" aria-live="polite"></p>
   <p id="msg2" role="status" aria-live="polite"></p>
@@ -697,6 +698,7 @@
     buildTimeline();
     $('btn-trails').classList.toggle('hidden', !has);
     $('btn-3d').classList.toggle('hidden', !has && !view3d);
+    $('btn-center').classList.toggle('hidden', !has && !view3d);
     $('btn-trails').textContent = dayGroups.every(function (g) { return g.trail || g.wps.length < 2; }) ? 'Trails ✓' : 'Trails + elevation';
 
     var ul = $('days');
@@ -1039,6 +1041,13 @@
       setMsg('3D view failed: ' + e.message, true);
     }).then(function () { view3dBusy = false; $('btn-3d').disabled = false; });
   }
+  // Whole trip back in view: the map refits its bounds, the 3D scene returns to its opening camera.
+  function centerView() {
+    if (view3d) { view3d.resetView(); return; }
+    var b = bounds3d();
+    if (b) map.fitBounds([[b.south, b.west], [b.north, b.east]], { maxZoom: 16 });
+    else if (route) map.fitBounds(routeBounds().pad(0.1));
+  }
   function exit3d() {
     if (!view3d) return;
     view3d.dispose(); view3d = null;
@@ -1211,6 +1220,7 @@
   $('tl').addEventListener('input', function () { stopPlay(); applyTimeline(+this.value); });
   $('btn-play').addEventListener('click', togglePlay);
   $('btn-3d').addEventListener('click', function () { if (view3d) exit3d(); else enter3d(); });
+  $('btn-center').addEventListener('click', centerView);
 
   // Exposed for the test-suite only.
   window.__hike = {
@@ -1218,7 +1228,7 @@
     days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, dur: g.dur, color: g.color, wps: g.wps.length, trail: g.trail ? { n: g.trail.coords.length, km: g.trail.km, up: g.trail.up, down: g.trail.down, recorded: !!g.trail.recorded } : null }; }); },
     thinTrack: thinTrack,
     tileMode: function () { return TILE_MODES[tileMode].name; }, setCustomTiles: function (u) { localStorage.setItem(CUSTOM_TILES_KEY, u); },
-    view3d: function () { return view3d; }, bounds3d: bounds3d,
+    view3d: function () { return view3d; }, bounds3d: bounds3d, mapCenter: function () { var c = map.getCenter(); return { lat: c.lat, lon: c.lng, zoom: map.getZoom() }; },
     elevationGain: elevationGain, dayWaypoints: dayWaypoints,
     timelineAt: function (v) { var p = timelineAt(v); return p && { day: p.day.gi, t: p.t, lat: p.lat, lon: p.lon, ele: p.ele, km: p.km }; },
     timelineTotal: function () { return tlTotal; },

@@ -546,6 +546,16 @@ check(w3 && w3.y > 1512 * 1.25 && w3.y < 1512 * 1.25 + 600, `walker placed above
 check(st3w.segments[0] >= 50 && Math.abs(st3w.segmentsDrawn[0] - st3w.segments[0] / 2) <= 1 && st3w.segmentsDrawn[1] === st3w.segments[1], `day 1 densified to ${st3w.segments[0]} segments and drawn half-way, day 2 full but faded (${st3w.segmentsDrawn}/${st3w.segments})`);
 await page.evaluate(() => window.__hike.setTimeline(10000));
 check((await page.evaluate(() => window.__hike.view3d().state().walker)) === null, 'walker hidden at the end');
+// centre: the camera can be moved anywhere; the button brings it home
+const home3 = await page.evaluate(() => window.__hike.view3d().cameraPos());
+const box = await page.locator('#map3d canvas').boundingBox();
+await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+await page.mouse.down(); await page.mouse.move(box.x + box.width / 2 + 120, box.y + box.height / 2 + 60, { steps: 6 }); await page.mouse.up();
+const moved3 = await page.evaluate(() => window.__hike.view3d().cameraPos());
+check(Math.hypot(moved3.x - home3.x, moved3.z - home3.z) > 1, `drag moves the camera (${Math.hypot(moved3.x - home3.x, moved3.z - home3.z).toFixed(0)} m)`);
+await page.click('#btn-center');
+const back3 = await page.evaluate(() => window.__hike.view3d().cameraPos());
+check(near(back3.x, home3.x, 1e-6) && near(back3.y, home3.y, 1e-6) && near(back3.z, home3.z, 1e-6), 'Centre returns the 3D camera home');
 await page.click('#btn-3d');
 check((await page.evaluate(() => window.__hike.view3d())) === null && await page.locator('#map').isVisible() && (await page.locator('#map3d canvas').count()) === 0, 'back to the map, 3D disposed');
 // map tiles unavailable: height colours instead
@@ -562,6 +572,23 @@ await page.waitForFunction(() => /failed/.test(document.getElementById('msg').te
 check((await page.locator('#msg').innerText()).includes('3D view failed: no terrain tiles') && await page.locator('#map').isVisible() && await page.locator('#btn-3d').isEnabled(), 'no terrain: failure named, map restored');
 await page.unroute('**/elevation-tiles-prod/terrarium/**'); await page.unroute('**/tile.openstreetmap.org/**');
 demMode = 'ok';
+
+// ---- 14. centre on the map ----
+console.log('14. centre on the 2D map');
+await page.goto(base + hash); await page.reload(); await ready();
+const c0 = await page.evaluate(() => window.__hike.mapCenter());
+await page.evaluate(() => { const m = document.getElementById('map'); m.dispatchEvent(new Event('x')); });
+await page.evaluate(() => window.__hike.setTimeline(10000));
+const box2 = await page.locator('#map').boundingBox();
+await page.mouse.move(box2.x + box2.width / 2, box2.y + box2.height / 2);
+await page.mouse.down(); await page.mouse.move(box2.x + box2.width / 2 - 150, box2.y + box2.height / 2 - 100, { steps: 8 }); await page.mouse.up();
+await page.waitForTimeout(300);
+const c1 = await page.evaluate(() => window.__hike.mapCenter());
+check(Math.abs(c1.lat - c0.lat) > 1e-3 || Math.abs(c1.lon - c0.lon) > 1e-3, `map dragged away (${c1.lat.toFixed(3)}, ${c1.lon.toFixed(3)})`);
+await page.click('#btn-center');
+await page.waitForTimeout(400);
+const c2 = await page.evaluate(() => window.__hike.mapCenter());
+check(Math.abs(c2.lat - c0.lat) < 2e-3 && Math.abs(c2.lon - c0.lon) < 2e-3, `Centre refits the trip (${c2.lat.toFixed(3)}, ${c2.lon.toFixed(3)} vs ${c0.lat.toFixed(3)}, ${c0.lon.toFixed(3)})`);
 
 // ---- 9. tiles toggle and layout ----
 console.log('9. tiles and layout');

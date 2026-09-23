@@ -89,8 +89,12 @@ absolute, so they line up with a recorded GPX taken in another time zone. It rea
   through them, with the altitude of every vertex. A second status line under
   the buttons reports "Routing day 3 of 9…" and, at the end, which days could
   not be routed and why; the **Trails + elevation** button retries those. Each day then shows its trail distance and **↑ ascent ↓
-  descent** (an 8 m hysteresis filters out elevation noise), and the stats line
-  sums the ascent. Results are cached on the device per set of photo
+  descent**, and the stats line sums the ascent. Ascent and descent use a
+  threshold method: a running level starts at the first elevation and moves
+  only when the track is at least 8 m above or below it; each move counts in
+  full. Wobbles under 8 m are ignored. On routed days the elevations come from
+  a terrain model sampled at every trail vertex and can overstate rough
+  ground; recorded days use the recording's own (usually barometric) values. Results are cached on the device per set of photo
   positions, so it runs once. Ten positions go in one request (the public
   server allows 60 s per request and mountain legs are slow); longer days are
   split and joined. A photo taken off any mapped path makes the
@@ -108,7 +112,9 @@ absolute, so they line up with a recorded GPX taken in another time zone. It rea
   and zoom. Vertical scale is exaggerated 1.25×. The scene covers the whole
   trip at the zoom that fits it in 36 terrain tiles; the module and three.js
   (vendored under `vendor/three`, release r186) load only when the button is
-  first pressed. **Map** returns to the 2D view.
+  first pressed. **Map** returns to the 2D view. **Centre** brings the whole
+  trip back into view in either mode (the map refits its bounds, the 3D
+  camera returns to its opening position).
 * **Walk timeline.** The slider above the day list runs over the trip's
   walking time (the days back to back, nights skipped). Drag it and the map
   shows the walk up to that moment: the trail drawn so far in the day's
