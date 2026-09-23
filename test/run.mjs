@@ -388,9 +388,12 @@ await page.route('**/brouter?*', async r => {
 await page.goto(base + hash); await ready();
 check(await page.locator('#btn-trails').isVisible(), 'trails button offered');
 await page.waitForFunction(() => document.getElementById('msg2').textContent.includes('days on trails'));   // no click: routing starts by itself
-check((await page.locator('#msg2').innerText()) === '2 of 2 days on trails with elevation.', `message: ${await page.locator('#msg2').innerText()}`);
+check((await page.locator('#msg2').innerText()) === '2 of 2 days on trails with elevation, 2 links between days.', `message: ${await page.locator('#msg2').innerText()}`);
 check((await page.locator('#msg').innerText()) === '', 'routing status does not overwrite the main message');
-check(brReqs.map(r => r.profile).join(',') === 'hiking-mountain,trekking,hiking-mountain', `profile fallback then normal: ${brReqs.map(r => r.profile).join(',')}`);
+check(brReqs.map(r => r.profile).join(',') === 'hiking-mountain,trekking,hiking-mountain,hiking-mountain,hiking-mountain', `profile fallback, then day 2, then two links: ${brReqs.map(r => r.profile).join(',')}`);
+const lk = await page.evaluate(() => window.__hike.links());
+check(lk.length === 2 && lk[0].from === 0 && lk[0].to === 1 && lk[1].from === 1 && lk[1].to === 2 && lk[0].n === 8, `links routed between day ends and next starts (${JSON.stringify(lk)})`);
+check((await lines('link-line')) === 2 && (await page.locator('#stats').innerText()).includes('km between days'), 'dotted links drawn, stats show their length');
 check((await lines('routed')) === 2 && (await lines('straight')) === 1, `2 routed lines, 1 straight (single-photo day)`);
 const tdays = await page.evaluate(() => window.__hike.days());
 check(tdays[0].trail && tdays[0].trail.n === 8 && tdays[0].trail.up === 50 && tdays[0].trail.down === 20, 'day 1 trail: 8 vertices, up 50, down 20');
@@ -400,7 +403,7 @@ check((await page.locator('#days li').nth(0).innerText()).includes('↑ 50 m ↓
 check((await page.locator('#stats').innerText()).includes('↑ 100 m'), 'total ascent in stats');
 check((await page.locator('#btn-trails').innerText()) === 'Trails ✓', 'button shows done');
 const g2 = await page.evaluate(() => window.__hike.gpx());
-check((g2.match(/<ele>/g) || []).length === 16 && g2.includes('on trails'), 'GPX carries routed points with elevation');
+check((g2.match(/<ele>/g) || []).length === 32 && g2.includes('on trails') && g2.includes('between day 1 and day 2'), 'GPX carries routed points with elevation, plus the links');
 // timeline on a routed day: half-way in time is half-way along the trail, with elevation interpolated
 const tlr = await page.evaluate(() => window.__hike.timelineAt(10000 * 30 / 121));
 check(tlr && tlr.day === 0 && near(tlr.lat, 46.535, 1e-6) && near(tlr.ele, 1017.5, 1e-2), `timeline follows the routed trail: lat ${tlr && tlr.lat.toFixed(4)}, ele ${tlr && tlr.ele}`);
@@ -488,7 +491,7 @@ check(/fixture-strava\.gpx: .*Sep 20 3\.4 km, .*Sep 21 2\.4 km\./.test(rmsg), `t
 check((await page.locator('#days .tag').count()) === 2 && (await lines('recorded')) === 2 && (await lines('straight')) === 1, 'days 1 and 2 recorded, day 3 straight');
 const rd = await page.evaluate(() => window.__hike.days());
 check(rd[0].trail.recorded && rd[0].trail.n === 200 && rd[0].trail.up >= 497 && rd[0].trail.up <= 500 && rd[0].trail.down >= 97 && rd[0].trail.down <= 100, `day 1 from the recording: ${rd[0].trail.n} points, up ${rd[0].trail.up}, down ${rd[0].trail.down}`);
-check(rd[0].dur === 199 * 30000 && rd[1].dur === 99 * 30000, 'day durations from the recording');
+check(rd[0].dur === 199 * 30000 && rd[1].dur === 3 * 3600000, `day durations span the recording and the photos (${rd[0].dur / 60000}, ${rd[1].dur / 60000} min)`);
 const rtotal = await page.evaluate(() => window.__hike.timelineTotal());
 check(rtotal === (199 + 99) * 30000 + 60000, `walk time from recordings: ${rtotal / 60000} min`);
 const half = await page.evaluate((v) => window.__hike.timelineAt(v), 10000 * (199 * 30000 / 2) / rtotal);
@@ -628,6 +631,38 @@ await page.click('#btn-center');
 await page.waitForTimeout(400);
 const c2 = await page.evaluate(() => window.__hike.mapCenter());
 check(Math.abs(c2.lat - c0.lat) < 2e-3 && Math.abs(c2.lon - c0.lon) < 2e-3, `Centre refits the trip (${c2.lat.toFixed(3)}, ${c2.lon.toFixed(3)} vs ${c0.lat.toFixed(3)}, ${c0.lon.toFixed(3)})`);
+
+// ---- 12b. a recording that stopped before the day's last photo: routed extension ----
+console.log('12b. recorded day extended to a later photo');
+await page.evaluate(() => { localStorage.removeItem('hike-map.trails.v1'); localStorage.removeItem('hike-map.recorded.v1'); });
+await page.route('**/brouter?*', async r => {
+  const u = new URL(r.request().url()), lonlats = u.searchParams.get('lonlats').split('|');
+  const [lon0, lat0] = lonlats[0].split(',').map(Number), [lon1, lat1] = lonlats[lonlats.length - 1].split(',').map(Number);
+  const coords = ELE.map((e, i) => [lon0 + (lon1 - lon0) * i / 7, lat0 + (lat1 - lat0) * i / 7, e]);
+  await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } }] }) });
+});
+// day 1 photos at 08:00 and 09:00Z lie inside the recording (08:00–09:39Z); a photo at 12:00Z, 1.7 km past its end, does not
+await page.goto(base + hash.replace('&s=2', ';46.565,12.015,2026-09-20T12:00:00Z&s=2')); await page.reload(); await ready();
+await page.waitForFunction(() => document.getElementById('msg2').textContent.includes('days on trails'));
+const rec4 = path.join(root, 'test', 'fixture-strava2.gpx');
+fs.writeFileSync(rec4, recordedGpx([{ date: '2026-09-20', n: 200, from: [46.52, 12.00], to: [46.55, 12.01], ele: () => 1500 }]));
+await page.setInputFiles('#rec-file', rec4);
+await page.waitForFunction(() => document.getElementById('msg').textContent.includes('fixture-strava2.gpx'));
+// the previous pass's summary is still on screen; wait for the new pass (600 ms later) to extend the day
+await page.waitForFunction(() => { const d = window.__hike.days()[0]; return d.trail && d.trail.extended; }, null, { timeout: 20000 });
+await page.waitForFunction(() => /days on trails/.test(document.getElementById('msg2').textContent) && !/Routing/.test(document.getElementById('msg2').textContent));
+const xd = await page.evaluate(() => window.__hike.days());
+check(xd[0].wpsAfter === 2 && xd[0].trail.recorded && xd[0].trail.extended && xd[0].trail.n === 207, `day 1: recording + 7 routed vertices to the late photo (n=${xd[0].trail.n}, wpsAfter=${xd[0].wpsAfter}, extended=${xd[0].trail.extended})`);
+const recKm = pathKm([[46.52, 12.00], [46.55, 12.01]]);   // the fixture is a straight recording, so its 3 m-step distance equals the straight distance
+check(near(xd[0].trail.km, recKm + pathKm([[46.55, 12.01], [46.565, 12.015]]), 0.05) && xd[0].trail.up === 50 && xd[0].trail.down === 20, `distance and gain include the extension (${xd[0].trail.km.toFixed(2)} km = ${recKm.toFixed(2)} recorded + routed, up ${xd[0].trail.up}, down ${xd[0].trail.down})`);
+check((await lines('recorded')) === 1 && (await lines('link-line')) === 2, 'one recorded line (extended) and links to the next days');
+const xp = await page.evaluate(() => window.__hike.timelineAt(10000 * (3 * 60 + 30) / (4 * 60 + 60 + 1)));   // 3.5 h into day 1 (08:00–12:00), past the recording
+check(xp.day === 0 && xp.lat > 46.55 && xp.lat < 46.565, `timeline continues along the extension after the recording (lat ${xp.lat.toFixed(4)})`);
+await page.unroute('**/brouter?*');
+await page.route('**/brouter?*', r => r.fulfill({ status: 503, body: 'mock: routing off' }));
+await page.click('#btn-clear-rec');
+fs.unlinkSync(rec4);
+await page.evaluate(() => localStorage.removeItem('hike-map.trails.v1'));
 
 // ---- 9. tiles toggle and layout ----
 console.log('9. tiles and layout');

@@ -91,6 +91,7 @@
     <span id="s-skipped-wrap" class="hidden"><b id="s-skipped">0</b> without GPS</span>
     <span id="s-off-wrap" class="hidden"><b id="s-off">0</b> off route</span>
     <span id="s-up-wrap" class="hidden">↑ <b id="s-up">0</b> m</span>
+    <span id="s-links-wrap" class="hidden">+ <b id="s-links">0</b> km between days</span>
   </div>
   <div id="timeline" class="hidden">
     <div class="tl-row">
@@ -150,6 +151,8 @@
   var BROUTER = 'https://brouter.de/brouter';
   var PROFILES = ['hiking-mountain', 'trekking'];     // tried in order
   var WP_MIN_M = 40, WP_PER_REQUEST = 10, FETCH_TIMEOUT_MS = 75000;
+  var EXT_MIN_M = 100, LINK_MIN_M = 60;   // route a recording's missing tail/head or a day-to-day link only past these gaps
+  var links = [];       // [{from: dayIndex, to: dayIndex, coords, km}] routed between consecutive days
   // Calibrated on three Strava exports against the figures Strava shows for them (see README):
   var ELE_HYST_M = 1;          // recordings: barometric streams are already smooth; 1 m keeps ascent within 10 % of Strava
   var autoRoutedFor = '';
@@ -379,15 +382,46 @@
       g.color = DAY_COLORS[i % DAY_COLORS.length];
       g.wps = dayWaypoints(g.pts);
       var rec = recorded[g.key];
-      g.trail = rec ? { coords: rec.coords.map(function (c) { return [c[0], c[1], c[2]]; }), times: rec.coords.map(function (c) { return c[3]; }),
-                       km: rec.km, up: rec.up, down: rec.down, recorded: true }
-                    : (trails[wpHash(g.wps)] || null);
+      g.wpsBefore = []; g.wpsAfter = [];
+      if (rec) {
+        var rc = rec.coords, first = { lat: rc[0][0], lon: rc[0][1] }, last = { lat: rc[rc.length - 1][0], lon: rc[rc.length - 1][1] };
+        var t0 = rc[0][3], t1 = rc[rc.length - 1][3];
+        var before = g.pts.filter(function (p) { return p.t < t0; }), after = g.pts.filter(function (p) { return p.t > t1; });
+        if (before.length && haversineKm(first, before[0]) * 1000 > EXT_MIN_M) g.wpsBefore = dayWaypoints(before.concat([first]));
+        if (after.length && haversineKm(last, after[after.length - 1]) * 1000 > EXT_MIN_M) g.wpsAfter = dayWaypoints([last].concat(after));
+        var extB = g.wpsBefore.length >= 2 ? trails['ext:' + wpHash(g.wpsBefore)] : null;
+        var extA = g.wpsAfter.length >= 2 ? trails['ext:' + wpHash(g.wpsAfter)] : null;
+        var coords = [], times = [];
+        if (extB) { extB.coords.slice(0, -1).forEach(function (c) { coords.push([c[0], c[1], c[2]]); times.push(NaN); }); }
+        rc.forEach(function (c) { coords.push([c[0], c[1], c[2]]); times.push(c[3]); });
+        if (extA) { extA.coords.slice(1).forEach(function (c) { coords.push([c[0], c[1], c[2]]); times.push(NaN); }); }
+        g.trail = { coords: coords, times: times, km: rec.km + (extB ? extB.km : 0) + (extA ? extA.km : 0),
+                    up: rec.up + (extB ? extB.up : 0) + (extA ? extA.up : 0), down: rec.down + (extB ? extB.down : 0) + (extA ? extA.down : 0),
+                    recorded: true, extended: !!(extA || extB) };
+      } else {
+        g.trail = trails[wpHash(g.wps)] || null;
+      }
       g.km = g.trail ? g.trail.km : totalKm(g.pts);
       var timed = g.pts.filter(function (p) { return !isNaN(p.t); });
-      g.dur = g.trail && g.trail.times ? g.trail.times[g.trail.times.length - 1] - g.trail.times[0]
-            : timed.length >= 2 ? timed[timed.length - 1].t - timed[0].t : NaN;
+      if (g.trail && g.trail.times) {
+        var all = g.trail.times.filter(function (t) { return !isNaN(t); }).concat(timed.map(function (p) { return p.t; }));
+        g.dur = Math.max.apply(null, all) - Math.min.apply(null, all);
+      } else g.dur = timed.length >= 2 ? timed[timed.length - 1].t - timed[0].t : NaN;
     });
+    links = [];
+    for (var li = 0; li + 1 < groups.length; li++) {
+      var ends = dayEnds(groups[li]), starts = dayEnds(groups[li + 1]);
+      if (!ends || !starts) continue;
+      var lkey = 'link:' + wpHash([ends.last, starts.first]);
+      if (trails[lkey] && haversineKm(ends.last, starts.first) * 1000 > LINK_MIN_M) links.push({ from: li, to: li + 1, coords: trails[lkey].coords, km: trails[lkey].km });
+    }
     return groups;
+  }
+  // First and last positions of a day's line (its track with extensions, or its photos).
+  function dayEnds(g) {
+    var c = g.trail ? g.trail.coords : g.pts.map(function (p) { return [p.lat, p.lon]; });
+    if (!c.length) return null;
+    return { first: { lat: c[0][0], lon: c[0][1] }, last: { lat: c[c.length - 1][0], lon: c[c.length - 1][1] } };
   }
 
   // ---------- formatting ----------
@@ -438,6 +472,11 @@
             (isNaN(p.t) ? '' : '<time>' + isoUTC(p.t) + '</time>') + '</trkpt>');
         });
       }
+      lines.push('  </trkseg></trk>');
+    });
+    links.forEach(function (l) {
+      lines.push('  <trk><name>' + n + ' between day ' + (l.from + 1) + ' and day ' + (l.to + 1) + '</name><trkseg>');
+      l.coords.forEach(function (c) { lines.push('    <trkpt lat="' + c[0] + '" lon="' + c[1] + '">' + (isFinite(c[2]) ? '<ele>' + c[2] + '</ele>' : '') + '</trkpt>'); });
       lines.push('  </trkseg></trk>');
     });
     lines.push('</gpx>', '');
@@ -716,6 +755,13 @@
           '<br><small>' + p.lat.toFixed(5) + ', ' + p.lon.toFixed(5) + '</small>').addTo(layer);
       });
     });
+    links.forEach(function (l) {
+      L.polyline(l.coords.map(function (c) { return [c[0], c[1]]; }),
+        { color: css('--ref'), weight: 3, opacity: .8, dashArray: '2 7', className: 'link-line', interactive: false }).addTo(layer);
+    });
+    var linkKm = links.reduce(function (a, l) { return a + l.km; }, 0);
+    $('s-links').textContent = linkKm.toFixed(1);
+    $('s-links-wrap').classList.toggle('hidden', !links.length);
     var boundsPts = sorted.map(function (p) { return [p.lat, p.lon]; });
     dayGroups.forEach(function (g) { if (g.trail && !g.pts.length) g.trail.coords.forEach(function (c) { boundsPts.push([c[0], c[1]]); }); });
     map.fitBounds(L.latLngBounds(boundsPts).pad(0.15), { maxZoom: 16 });
@@ -987,35 +1033,45 @@
   // ---------- timeline: where you were at any moment of the walk ----------
   // Per day, a path of {lat, lon, ele, d (km so far), t (ms)}: the routed trail with photo times pinned to
   // their nearest vertices and interpolated by distance in between, or the photo points themselves.
+  // Pin each photo's time to its nearest vertex that has no time yet (monotonic along the line),
+  // then fill the remaining vertices by distance between known times.
+  function fillTimes(path, pts) {
+    var i, from = 0;
+    pts.forEach(function (p) {
+      var best = -1, bd = Infinity;
+      for (var j = from; j < path.length; j++) { if (!isNaN(path[j].t)) continue; var dd = haversineKm(p, path[j]); if (dd < bd) { bd = dd; best = j; } }
+      if (best >= 0) { path[best].t = p.t; from = best; }
+    });
+    var known = [];
+    path.forEach(function (x, idx) { if (!isNaN(x.t)) known.push(idx); });
+    if (!known.length) return path;
+    for (i = 0; i < known[0]; i++) path[i].t = path[known[0]].t;
+    for (var k = 0; k + 1 < known.length; k++) {
+      var a = known[k], b = known[k + 1], ta = path[a].t, tb = path[b].t, da = path[a].d, db = path[b].d;
+      for (i = a + 1; i < b; i++) path[i].t = db > da ? ta + (tb - ta) * (path[i].d - da) / (db - da) : ta;
+    }
+    for (i = known[known.length - 1] + 1; i < path.length; i++) path[i].t = path[known[known.length - 1]].t;
+    return path;
+  }
   function buildPath(g) {
     var path, i;
+    var pts = g.pts.filter(function (p) { return !isNaN(p.t); });
     if (g.trail && g.trail.times && g.trail.coords.length > 1) {
       path = g.trail.coords.map(function (c, ci) { return { lat: c[0], lon: c[1], ele: c[2], d: 0, t: g.trail.times[ci] }; });
       for (i = 1; i < path.length; i++) path[i].d = path[i - 1].d + haversineKm(path[i - 1], path[i]);
       var thinned = path[path.length - 1].d, scale = thinned > 0 && g.trail.km ? g.trail.km / thinned : 1;
       path.forEach(function (x) { x.d *= scale; });      // the thinned line is a little shorter than the walk
+      if (g.trail.extended) {
+        var known = g.trail.times.filter(function (t) { return !isNaN(t); }), kt0 = Math.min.apply(null, known), kt1 = Math.max.apply(null, known);
+        fillTimes(path, pts.filter(function (p) { return p.t < kt0 || p.t > kt1; }));
+      }
       return path;
     }
-    var pts = g.pts.filter(function (p) { return !isNaN(p.t); });
     if (!pts.length) return [];
     if (g.trail && g.trail.coords.length > 1) {
       path = g.trail.coords.map(function (c) { return { lat: c[0], lon: c[1], ele: c[2], d: 0, t: NaN }; });
       for (i = 1; i < path.length; i++) path[i].d = path[i - 1].d + haversineKm(path[i - 1], path[i]);
-      var from = 0;
-      pts.forEach(function (p) {
-        var best = from, bd = Infinity;
-        for (var j = from; j < path.length; j++) { var dd = haversineKm(p, path[j]); if (dd < bd) { bd = dd; best = j; } }
-        if (isNaN(path[best].t)) path[best].t = p.t;
-        from = best;
-      });
-      var known = [];
-      path.forEach(function (x, idx) { if (!isNaN(x.t)) known.push(idx); });
-      for (i = 0; i < known[0]; i++) path[i].t = path[known[0]].t;
-      for (var k = 0; k + 1 < known.length; k++) {
-        var a = known[k], b = known[k + 1], ta = path[a].t, tb = path[b].t, da = path[a].d, db = path[b].d;
-        for (i = a + 1; i < b; i++) path[i].t = db > da ? ta + (tb - ta) * (path[i].d - da) / (db - da) : ta;
-      }
-      for (i = known[known.length - 1] + 1; i < path.length; i++) path[i].t = path[known[known.length - 1]].t;
+      fillTimes(path, pts);
     } else {
       path = pts.map(function (p) { return { lat: p.lat, lon: p.lon, ele: NaN, d: 0, t: p.t }; });
       for (i = 1; i < path.length; i++) path[i].d = path[i - 1].d + haversineKm(path[i - 1], path[i]);
@@ -1129,7 +1185,7 @@
     import('./view3d.js').then(function (m) {
       $('map').classList.add('hidden');
       $('map3d').classList.remove('hidden');
-      return m.build({ container: $('map3d'), bounds: b, days: days, huts: huts, textureUrl: texUrl, onProgress: setMsg });
+      return m.build({ container: $('map3d'), bounds: b, days: days, links: links.map(function (l) { return l.coords.map(function (c) { return [c[0], c[1]]; }); }), huts: huts, textureUrl: texUrl, onProgress: setMsg });
     }).then(function (v) {
       view3d = v;
       var st = v.state();
@@ -1198,8 +1254,8 @@
     };
     return next(null);
   }
-  function routeDay(g) {
-    var wps = g.wps;
+  function routeDay(g) { return routeWaypoints(g.wps); }
+  function routeWaypoints(wps) {
     if (wps.length < 2) return Promise.resolve(null);
     var chunks = [];
     for (var a = 0; a < wps.length - 1; a += WP_PER_REQUEST - 1) chunks.push(wps.slice(a, Math.min(wps.length, a + WP_PER_REQUEST)));
@@ -1216,30 +1272,52 @@
     if (routing || !dayGroups.length) return;
     routing = true;
     $('btn-trails').disabled = true;
-    var todo = dayGroups.filter(function (g) { return !g.trail && g.wps.length >= 2; });
+    var todo = [];
+    dayGroups.forEach(function (g, i) {
+      if (!g.trail && g.wps.length >= 2) todo.push({ label: 'day ' + (i + 1), key: wpHash(g.wps), wps: g.wps });
+      if (g.wpsBefore.length >= 2 && !trails['ext:' + wpHash(g.wpsBefore)]) todo.push({ label: 'start of day ' + (i + 1), key: 'ext:' + wpHash(g.wpsBefore), wps: g.wpsBefore });
+      if (g.wpsAfter.length >= 2 && !trails['ext:' + wpHash(g.wpsAfter)]) todo.push({ label: 'end of day ' + (i + 1), key: 'ext:' + wpHash(g.wpsAfter), wps: g.wpsAfter });
+    });
     var done = 0, failed = [];
-    todo.reduce(function (chain, g) {
-      return chain.then(function () {
-        setMsg2('Routing day ' + (dayGroups.indexOf(g) + 1) + ' of ' + dayGroups.length + ' along trails…');
-        return routeDay(g).then(function (t) {
-          if (t) { trails[wpHash(g.wps)] = t; saveTrails(); done++; render(); }
-        }).catch(function (e) { failed.push('day ' + (dayGroups.indexOf(g) + 1) + ' (' + e.message + ')'); });
-      });
-    }, Promise.resolve()).then(function () {
+    var queueLinks = function () {           // after days and extensions: the stretches between consecutive days
+      for (var i = 0; i + 1 < dayGroups.length; i++) {
+        var ends = dayEnds(dayGroups[i]), starts = dayEnds(dayGroups[i + 1]);
+        if (!ends || !starts || haversineKm(ends.last, starts.first) * 1000 <= LINK_MIN_M) continue;
+        var key = 'link:' + wpHash([ends.last, starts.first]);
+        if (!trails[key]) todo.push({ label: 'between day ' + (i + 1) + ' and ' + (i + 2), key: key, wps: [ends.last, starts.first] });
+      }
+    };
+    var runQueue = function () {
+      if (!todo.length) return Promise.resolve();
+      var job = todo.shift();
+      setMsg2('Routing ' + job.label + ' along trails…');
+      return routeWaypoints(job.wps).then(function (t) {
+        if (t) { trails[job.key] = t; saveTrails(); done++; render(); }
+      }).catch(function (e) { failed.push(job.label + ' (' + e.message + ')'); }).then(runQueue);
+    };
+    runQueue().then(function () { queueLinks(); return runQueue(); }).then(function () {
       routing = false;
       $('btn-trails').disabled = false;
       render();
       var n = dayGroups.filter(function (g) { return g.trail; }).length;
       var routable = dayGroups.filter(function (g) { return g.wps.length >= 2; }).length;
-      setMsg2(n + ' of ' + routable + ' days on trails with elevation' +
+      setMsg2(n + ' of ' + routable + ' days on trails with elevation' + (links.length ? ', ' + links.length + ' link' + (links.length === 1 ? '' : 's') + ' between days' : '') +
         (failed.length ? '. Not routed: ' + failed.join('; ') : '') + '.', failed.length > 0);
     });
   }
   // Routing starts by itself once per set of points; the button retries after a failure.
   function scheduleAutoRoute() {
-    var key = dayGroups.map(function (g) { return wpHash(g.wps); }).join('/');
+    // one automatic pass per set of inputs: photo waypoints, recording heads/tails and the recordings themselves
+    var key = dayGroups.map(function (g) { return wpHash(g.wps) + '|' + wpHash(g.wpsBefore) + '|' + wpHash(g.wpsAfter); }).join('/') + '/' + Object.keys(recorded).join(',');
     if (!key || key === autoRoutedFor) return;
-    var pending = dayGroups.some(function (g) { return !g.trail && g.wps.length >= 2; });
+    var pending = dayGroups.some(function (g, i) {
+      if ((!g.trail && g.wps.length >= 2) || (g.wpsBefore.length >= 2 && !trails['ext:' + wpHash(g.wpsBefore)]) || (g.wpsAfter.length >= 2 && !trails['ext:' + wpHash(g.wpsAfter)])) return true;
+      if (i + 1 < dayGroups.length) {
+        var ends = dayEnds(g), starts = dayEnds(dayGroups[i + 1]);
+        if (ends && starts && haversineKm(ends.last, starts.first) * 1000 > LINK_MIN_M && !trails['link:' + wpHash([ends.last, starts.first])]) return true;
+      }
+      return false;
+    });
     if (!pending) return;
     autoRoutedFor = key;
     setTimeout(routeAllDays, 600);
@@ -1330,7 +1408,8 @@
   // Exposed for the test-suite only.
   window.__hike = {
     points: function () { return sortByTime(points); },
-    days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, dur: g.dur, color: g.color, wps: g.wps.length, trail: g.trail ? { n: g.trail.coords.length, km: g.trail.km, up: g.trail.up, down: g.trail.down, recorded: !!g.trail.recorded } : null }; }); },
+    days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, dur: g.dur, color: g.color, wps: g.wps.length, wpsAfter: g.wpsAfter.length, wpsBefore: g.wpsBefore.length, trail: g.trail ? { n: g.trail.coords.length, km: g.trail.km, up: g.trail.up, down: g.trail.down, recorded: !!g.trail.recorded, extended: !!g.trail.extended } : null }; }); },
+    links: function () { return links.map(function (l) { return { from: l.from, to: l.to, n: l.coords.length, km: l.km }; }); },
     thinTrack: thinTrack, recordedKm: recordedKm, smoothElevation: smoothElevation,
     tileMode: function () { return TILE_MODES[tileMode].name; }, setCustomTiles: function (u) { localStorage.setItem(CUSTOM_TILES_KEY, u); },
     view3d: function () { return view3d; }, bounds3d: bounds3d, huts: function () { return huts; }, parseHuts: parseHuts, mapCenter: function () { var c = map.getCenter(); return { lat: c.lat, lon: c.lng, zoom: map.getZoom() }; }, panMap: function (dx, dy) { map.panBy([dx, dy], { animate: false }); },

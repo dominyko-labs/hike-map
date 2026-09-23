@@ -122,6 +122,16 @@ absolute, so they line up with a recorded GPX taken in another time zone. It rea
   router detour to the nearest trail and back, so the line between two photos
   is the router's guess along trails, not a GPS track. Days that could not be
   routed keep their straight line and are named in the message.
+  * **Between days.** Where one day's line ends and the next begins are the
+    evening walk to the hut and the morning walk from it, which no photo
+    covers. That stretch is routed too and drawn as a dotted grey link; its
+    length is shown separately in the stats line as "between days" and goes
+    into the GPX as its own track, but not into any day's figures.
+  * **A recording that stopped early.** When a recorded day has photos taken
+    before the recording started or after it ended, more than 100 m from
+    its ends, the page routes from the recording's end through those photos
+    and adds that to the day's track, distance and ascent; the timeline
+    continues along it.
 * **Download GPX** saves one track per day, on the routed trail with
   elevation where available, plus a waypoint per photo.
 * **Huts.** **Huts from OSM** fetches every `tourism=alpine_hut` and

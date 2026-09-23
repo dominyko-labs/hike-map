@@ -45,7 +45,7 @@ function pickBlock(bounds) {
 }
 
 export async function build(opts) {
-  const { container, bounds, days, huts = [], textureUrl, onProgress = () => {} } = opts;
+  const { container, bounds, days, links = [], huts = [], textureUrl, onProgress = () => {} } = opts;
   const blk = pickBlock(bounds);
   if (!blk) throw new Error('area too large');
   const W = blk.nx * TILE, H = blk.ny * TILE;
@@ -195,6 +195,15 @@ export async function build(opts) {
     const mesh = new Line2(lg, mat); mesh.computeLineDistances(); scene.add(mesh);
     return { mesh, segments: dense.length - 1 };
   });
+  links.forEach(coords => {
+    if (coords.length < 2) return;
+    const flat = [];
+    densify(coords).forEach(c => { const l = toLocal(c[0], c[1]); flat.push(l.x, (heightAt(c[0], c[1]) + TRACK_LIFT) * EXAG, l.z); });
+    const lg = new LineGeometry(); lg.setPositions(flat);
+    const mat = new LineMaterial({ color: 0x777777, linewidth: 3, worldUnits: false, transparent: true, opacity: 0.85, dashed: true, dashSize: span * 0.004, gapSize: span * 0.004 });
+    mat.resolution.copy(resolution); lineMaterials.push(mat);
+    const mesh = new Line2(lg, mat); mesh.computeLineDistances(); scene.add(mesh);
+  });
   const sphereR = Math.max(4, span / 900);
   const photoCount = days.reduce((a, d) => a + d.photos.length, 0);
   let photos = null;
@@ -285,7 +294,7 @@ export async function build(opts) {
     // Back to the opening framing: whole trip in view, looking north from the south.
     resetView() { camera.position.copy(home); controls.target.copy(center); controls.update(); render(); },
     cameraPos() { return { x: camera.position.x, y: camera.position.y, z: camera.position.z }; },
-    state() { return { z: blk.z, tiles: total, missing, textureTiles, vertices: gw * gh, skirt: ring.length, huts: huts.length, days: dayMeshes.filter(Boolean).length, photos: photoCount, walker: walkerPos, minH, maxH,
+    state() { return { z: blk.z, tiles: total, missing, textureTiles, vertices: gw * gh, skirt: ring.length, huts: huts.length, links: links.length, days: dayMeshes.filter(Boolean).length, photos: photoCount, walker: walkerPos, minH, maxH,
                        segmentsDrawn: dayMeshes.map(dm => dm ? dm.mesh.geometry.instanceCount : 0), segments: dayMeshes.map(dm => dm ? dm.segments : 0) }; },
     dispose() {
       window.removeEventListener('resize', onResize);
