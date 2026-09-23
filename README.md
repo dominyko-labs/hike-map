@@ -140,7 +140,10 @@ absolute, so they line up with a recorded GPX taken in another time zone. It rea
   malga, baita, refuge) that is tagged as lodging or food instead, and keeps the
   named ones within 1.2 km of a walked line or photo. They appear as brown
   pins with their names on the map (tap for the altitude) and as labelled
-  pins in 3D, and are kept on the device. Tapping the button again refreshes
+  pins in 3D, and are kept on the device. Labels follow the zoom: on the map
+  they are hidden below zoom 11, small up to 13 and full size from 14; in 3D
+  they are sized in screen pixels, shrinking as the camera moves away and
+  hiding when they would be under 9 px. Tapping the button again refreshes
   them.
 * **3D.** The **3D** button swaps the map for a terrain view: elevation from
   the [AWS Open Data terrain tiles](https://registry.opendata.aws/terrain-tiles/)

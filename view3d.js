@@ -217,7 +217,10 @@ export async function build(opts) {
     }));
     scene.add(photos);
   }
-  // huts: a brown pin and a label sprite
+  // huts: a brown pin and a label sprite sized in screen pixels (sizeAttenuation off), so it never
+  // dwarfs the terrain; the pixel size shrinks as the camera moves away and the label hides when
+  // it would be unreadable.
+  const LABEL_PX_MAX = 20, LABEL_PX_MIN = 9;
   const labelSprite = (text, bg, fg) => {
     const cv = document.createElement('canvas'), cx = cv.getContext('2d');
     cx.font = '600 28px -apple-system, "Segoe UI", Roboto, sans-serif';
@@ -226,19 +229,33 @@ export async function build(opts) {
     cx.fillStyle = bg; cx.beginPath(); cx.roundRect(0, 0, w, h, 10); cx.fill();
     cx.fillStyle = fg; cx.textBaseline = 'middle'; cx.fillText(text, 14, h / 2 + 1);
     const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace;
-    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, depthTest: false, transparent: true }));
-    sp.scale.set(w / h * span * 0.045, span * 0.045, 1); sp.renderOrder = 10;
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, depthTest: false, transparent: true, sizeAttenuation: false }));
+    sp.userData.aspect = w / h; sp.renderOrder = 10;
     return sp;
   };
-  const hutGroup = new THREE.Group();
+  const hutGroup = new THREE.Group(), labels = [];
   huts.forEach(h => {
     const l = toLocal(h.lat, h.lon), y = (heightAt(h.lat, h.lon) + TRACK_LIFT) * EXAG;
     const pin = new THREE.Mesh(new THREE.ConeGeometry(sphereR * 1.6, sphereR * 5, 8), new THREE.MeshLambertMaterial({ color: 0x8b4513 }));
     pin.position.set(l.x, y + sphereR * 2.5, l.z); pin.rotation.x = Math.PI; hutGroup.add(pin);
     const lab = labelSprite(h.name, 'rgba(255,255,255,0.92)', '#3b2a14');
-    lab.position.set(l.x, y + sphereR * 6 + span * 0.03, l.z); hutGroup.add(lab);
+    lab.position.set(l.x, y + sphereR * 7, l.z); hutGroup.add(lab); labels.push(lab);
   });
   scene.add(hutGroup);
+  let labelPx = [];
+  // Label height in pixels for a camera at distance d: full size near the terrain, shrinking with the
+  // square root of distance past a quarter of the span, hidden under LABEL_PX_MIN.
+  const labelPxFor = d => Math.min(LABEL_PX_MAX, LABEL_PX_MAX * Math.sqrt(Math.max(1e-6, span * 0.25 / Math.max(1, d))));
+  const updateLabels = (camera, viewW, viewH) => {
+    const k = 2 * Math.tan(camera.fov * Math.PI / 360);          // NDC height per unit of unattenuated sprite scale
+    labelPx = labels.map(lab => {
+      const px = labelPxFor(camera.position.distanceTo(lab.position));
+      lab.visible = px >= LABEL_PX_MIN;
+      const sy = px / viewH * k;                                   // sprite scale.y in NDC units -> px tall
+      lab.scale.set(sy * lab.userData.aspect * viewH / viewW, sy, 1);
+      return lab.visible ? Math.round(px) : 0;
+    });
+  };
   const walker = new THREE.Mesh(new THREE.SphereGeometry(sphereR * 2.2, 14, 10), new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x444444 }));
   walker.visible = false; scene.add(walker);
   const poleH = sphereR * 14;
@@ -260,7 +277,7 @@ export async function build(opts) {
   controls.maxPolarAngle = Math.PI * 0.49;
   controls.minDistance = span * 0.02; controls.maxDistance = span * 3;
   controls.update();
-  const render = () => renderer.render(scene, camera);
+  const render = () => { updateLabels(camera, container.clientWidth, container.clientHeight); renderer.render(scene, camera); };
   controls.addEventListener('change', render);
   const onResize = () => {
     renderer.setSize(container.clientWidth, container.clientHeight);
@@ -294,6 +311,9 @@ export async function build(opts) {
     // Back to the opening framing: whole trip in view, looking north from the south.
     resetView() { camera.position.copy(home); controls.target.copy(center); controls.update(); render(); },
     cameraPos() { return { x: camera.position.x, y: camera.position.y, z: camera.position.z }; },
+    // Move the camera towards (factor < 1) or away from (factor > 1) the target, as a pinch would.
+    dolly(factor) { camera.position.sub(controls.target).multiplyScalar(factor).add(controls.target); controls.update(); render(); },
+    labelPx() { return labelPx.slice(); },
     state() { return { z: blk.z, tiles: total, missing, textureTiles, vertices: gw * gh, skirt: ring.length, huts: huts.length, links: links.length, days: dayMeshes.filter(Boolean).length, photos: photoCount, walker: walkerPos, minH, maxH,
                        segmentsDrawn: dayMeshes.map(dm => dm ? dm.mesh.geometry.instanceCount : 0), segments: dayMeshes.map(dm => dm ? dm.segments : 0) }; },
     dispose() {

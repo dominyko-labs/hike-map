@@ -86,6 +86,10 @@
   .hut { background: none; border: 0; }
   .hut .pin { display: inline-block; width: 18px; height: 18px; border-radius: 4px 4px 4px 0; background: #8b4513; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.4); transform: rotate(-45deg); }
   .hut .lbl { position: absolute; left: 22px; top: -2px; white-space: nowrap; font: 600 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #3b2a14; background: rgba(255,255,255,.85); padding: 1px 5px; border-radius: 4px; pointer-events: none; }
+  /* hut labels follow the zoom: hidden when zoomed out, small at mid zooms, full size close in */
+  .z-lo .hut .lbl { display: none; }
+  .z-lo .hut .pin { width: 12px; height: 12px; }
+  .z-mid .hut .lbl { font-size: 10px; padding: 0 4px; left: 20px; top: 0; }
 </style>
 </head>
 <body>
@@ -675,6 +679,8 @@
     layer = L.layerGroup().addTo(map);
     progressLayer = L.layerGroup().addTo(map);
     hutLayer = L.layerGroup().addTo(map);
+    map.on('zoomend', applyZoomClass);
+    applyZoomClass();
   }
   function customTilesUrl() {
     try { return localStorage.getItem(CUSTOM_TILES_KEY) || ''; } catch (e) { return ''; }
@@ -695,6 +701,13 @@
     try { localStorage.setItem(TILES_KEY, String(tileMode)); } catch (e) { /* private mode */ }
   }
   // Cycle Street -> Topo -> Topo + trails -> Custom (asks for a URL template once) -> Street.
+  // A class on the map container tells CSS how big labels may be at this zoom.
+  function applyZoomClass() {
+    var z = map.getZoom(), el = map.getContainer();
+    el.classList.toggle('z-lo', z < 11);
+    el.classList.toggle('z-mid', z >= 11 && z < 14);
+    el.classList.toggle('z-hi', z >= 14);
+  }
   function toggleTiles() {
     var next = (tileMode + 1) % TILE_MODES.length;
     if (TILE_MODES[next].custom) {
@@ -1552,7 +1565,7 @@
     links: function () { return links.map(function (l) { return { from: l.from, to: l.to, n: l.coords.length, km: l.km }; }); },
     thinTrack: thinTrack, recordedKm: recordedKm, smoothElevation: smoothElevation,
     tileMode: function () { return TILE_MODES[tileMode].name; }, setCustomTiles: function (u) { localStorage.setItem(CUSTOM_TILES_KEY, u); },
-    view3d: function () { return view3d; }, bounds3d: bounds3d, huts: function () { return huts; }, parseHuts: parseHuts, mapCenter: function () { var c = map.getCenter(); return { lat: c.lat, lon: c.lng, zoom: map.getZoom() }; }, panMap: function (dx, dy) { map.panBy([dx, dy], { animate: false }); },
+    view3d: function () { return view3d; }, bounds3d: bounds3d, huts: function () { return huts; }, parseHuts: parseHuts, mapCenter: function () { var c = map.getCenter(); return { lat: c.lat, lon: c.lng, zoom: map.getZoom() }; }, setZoom: function (z) { map.setZoom(z, { animate: false }); }, panMap: function (dx, dy) { map.panBy([dx, dy], { animate: false }); },
     elevationGain: elevationGain, dayWaypoints: dayWaypoints,
     timelineAt: function (v) { var p = timelineAt(v); return p && { day: p.day.gi, t: p.t, lat: p.lat, lon: p.lon, ele: p.ele, km: p.km }; },
     timelineTotal: function () { return tlTotal; },

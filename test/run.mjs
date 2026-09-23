@@ -554,6 +554,12 @@ const hl = await page.evaluate(() => window.__hike.huts().map(h => h.name + (h.e
 check(hl.join(', ') === 'Rifugio Uno 2050, Rifugio Due, Rifugio Tre, Malga Quattro', `building centres and hotel/restaurant rifugi kept, the duplicate outline of Rifugio Uno merged, far and nameless dropped (${hl.join(', ')})`);
 check((await page.locator('.leaflet-marker-icon.hut').count()) === 4 && (await page.locator('.hut .lbl').allInnerTexts()).join(',') === 'Rifugio Uno,Rifugio Due,Rifugio Tre,Malga Quattro', 'hut markers with labels on the map');
 check((await page.locator('#btn-huts').innerText()) === 'Huts ✓ (4)', 'button shows the count');
+// label size follows the zoom: hidden below 11, small to 13, full from 14
+const lblAt = async z => { await page.evaluate(z => window.__hike.setZoom(z), z); await page.waitForTimeout(50); return page.evaluate(() => { const l = document.querySelector('.hut .lbl'); const cs = getComputedStyle(l); return { display: cs.display, size: cs.fontSize, cls: document.getElementById('map').className.match(/z-\w+/)[0] }; }); };
+const l9 = await lblAt(9), l12 = await lblAt(12), l15 = await lblAt(15);
+check(l9.display === 'none' && l9.cls === 'z-lo', `zoom 9: labels hidden (${l9.cls})`);
+check(l12.display !== 'none' && l12.size === '10px' && l12.cls === 'z-mid', `zoom 12: small labels (${l12.size}, ${l12.cls})`);
+check(l15.display !== 'none' && l15.size === '12px' && l15.cls === 'z-hi', `zoom 15: full labels (${l15.size}, ${l15.cls})`);
 await page.reload(); await ready();
 check((await page.locator('.leaflet-marker-icon.hut').count()) === 4, 'huts survive a reload');
 await page.unroute('**/api/interpreter');
@@ -578,6 +584,12 @@ check(st3.z === 14 && st3.tiles === demHits && st3.missing === 0 && st3.tiles <=
 check(st3.textureTiles > 0 && mapHits >= st3.textureTiles, `map tiles draped: ${st3.textureTiles} (requested ${mapHits})`);
 check(st3.vertices > 4000 && st3.skirt > 100, `terrain mesh: ${st3.vertices} vertices, skirt ring of ${st3.skirt}`);
 check(st3.huts === 4, `4 huts in the scene (got ${st3.huts})`);
+const lp0 = await page.evaluate(() => window.__hike.view3d().labelPx());
+check(lp0.length === 4 && lp0.every(px => px === 0 || (px >= 9 && px <= 20)), `3D labels sized in pixels, within 9–20 px or hidden (${lp0})`);
+const lpNear = await page.evaluate(() => { window.__hike.view3d().dolly(0.15); return window.__hike.view3d().labelPx(); });
+const lpFar = await page.evaluate(() => { window.__hike.view3d().dolly(20); return window.__hike.view3d().labelPx(); });
+check(Math.max(...lpNear) === 20 && Math.max(...lpFar) < Math.max(...lpNear), `labels grow when closer (${Math.max(...lpNear)} px) and shrink or hide when far (${Math.max(...lpFar)} px)`);
+await page.evaluate(() => window.__hike.view3d().resetView());
 check(st3.days === 2 && st3.photos === 5, `2 day tubes (single-photo day has no line), 5 photo spheres (got ${st3.days}, ${st3.photos})`);
 const hAt = await page.evaluate(() => window.__hike.view3d().heightAt(46.55, 12.01));
 check(near(hAt, 1500, 0.01), `elevation decoded from terrarium: ${hAt} m`);
