@@ -125,7 +125,9 @@ absolute, so they line up with a recorded GPX taken in another time zone. It rea
 * **Download GPX** saves one track per day, on the routed trail with
   elevation where available, plus a waypoint per photo.
 * **Huts.** **Huts from OSM** fetches every `tourism=alpine_hut` and
-  `wilderness_hut` node OpenStreetMap has inside the trip's area and keeps the
+  `wilderness_hut` OpenStreetMap has inside the trip's area, as points, building
+  outlines or relations, plus anything named like a hut (rifugio, Hütte,
+  malga, baita, refuge) that is tagged as lodging or food instead, and keeps the
   named ones within 1.2 km of a walked line or photo. They appear as brown
   pins with their names on the map (tap for the altitude) and as labelled
   pins in 3D, and are kept on the device. Rifugi that OpenStreetMap tags

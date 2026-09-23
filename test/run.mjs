@@ -538,18 +538,21 @@ await page.route('**/api/interpreter', async r => {
     { type: 'node', id: 2, lat: 46.575, lon: 12.018, tags: { tourism: 'alpine_hut', 'name:it': 'Rifugio Due' } },
     { type: 'node', id: 3, lat: 46.80, lon: 12.30, tags: { tourism: 'alpine_hut', name: 'Far Away Hut' } },
     { type: 'node', id: 4, lat: 46.522, lon: 12.002, tags: { tourism: 'alpine_hut' } },
-    { type: 'way', id: 5, tags: { tourism: 'alpine_hut', name: 'A way, ignored' } }] }) });
+    { type: 'way', id: 5, center: { lat: 46.5215, lon: 12.0012 }, tags: { building: 'yes', tourism: 'alpine_hut', name: 'Rifugio Uno' } },
+    { type: 'way', id: 6, center: { lat: 46.601, lon: 12.031 }, tags: { building: 'yes', tourism: 'hotel', name: 'Rifugio Tre' } },
+    { type: 'relation', id: 7, center: { lat: 46.55, lon: 12.011 }, tags: { amenity: 'restaurant', name: 'Malga Quattro' } },
+    { type: 'way', id: 8, tags: { tourism: 'alpine_hut', name: 'No centre, ignored' } }] }) });
 });
 await page.click('#btn-huts');
 await page.waitForFunction(() => /hut/.test(document.getElementById('msg').textContent) && !/Fetching/.test(document.getElementById('msg').textContent));
-check(/^\[out:json\]\[timeout:60\];node\["tourism"~"\^\(alpine_hut\|wilderness_hut\)\$"\]\(46\.\d+,11\.\d+,46\.\d+,12\.\d+\);out body;$/.test(hutQuery), `hut query over the trip bounds: ${hutQuery}`);
-check((await page.locator('#msg').innerText()) === '2 huts near the walk (3 in the area). Saved on this device.', `message: ${await page.locator('#msg').innerText()}`);
+check(hutQuery.startsWith('[out:json][timeout:60];(nwr["tourism"~"^(alpine_hut|wilderness_hut)$"](46.') && hutQuery.includes('nwr["name"~"rifugio|rif\\\\. |hütte|huette|malga|baita|refuge",i]["tourism"](') && hutQuery.includes('["amenity"~"^(restaurant|cafe|bar|shelter)$"](') && hutQuery.endsWith(');out center;'), `points, outlines and relations, by tag or by name: ${hutQuery}`);
+check((await page.locator('#msg').innerText()) === '4 huts near the walk (5 in the area). Saved on this device.', `message: ${await page.locator('#msg').innerText()}`);
 const hl = await page.evaluate(() => window.__hike.huts().map(h => h.name + (h.ele ? ' ' + h.ele : '')));
-check(hl.join(', ') === 'Rifugio Uno 2050, Rifugio Due', `named huts within 1.2 km kept, far and nameless dropped (${hl.join(', ')})`);
-check((await page.locator('.leaflet-marker-icon.hut').count()) === 2 && (await page.locator('.hut .lbl').allInnerTexts()).join(',') === 'Rifugio Uno,Rifugio Due', 'hut markers with labels on the map');
-check((await page.locator('#btn-huts').innerText()) === 'Huts ✓ (2)', 'button shows the count');
+check(hl.join(', ') === 'Rifugio Uno 2050, Rifugio Due, Rifugio Tre, Malga Quattro', `building centres and hotel/restaurant rifugi kept, the duplicate outline of Rifugio Uno merged, far and nameless dropped (${hl.join(', ')})`);
+check((await page.locator('.leaflet-marker-icon.hut').count()) === 4 && (await page.locator('.hut .lbl').allInnerTexts()).join(',') === 'Rifugio Uno,Rifugio Due,Rifugio Tre,Malga Quattro', 'hut markers with labels on the map');
+check((await page.locator('#btn-huts').innerText()) === 'Huts ✓ (4)', 'button shows the count');
 await page.reload(); await ready();
-check((await page.locator('.leaflet-marker-icon.hut').count()) === 2, 'huts survive a reload');
+check((await page.locator('.leaflet-marker-icon.hut').count()) === 4, 'huts survive a reload');
 await page.unroute('**/api/interpreter');
 
 // ---- 13. 3D terrain view (mocked terrain and map tiles) ----
@@ -571,7 +574,7 @@ const st3 = await page.evaluate(() => window.__hike.view3d().state());
 check(st3.z === 14 && st3.tiles === demHits && st3.missing === 0 && st3.tiles <= 36, `terrain: ${st3.tiles} tiles at zoom ${st3.z}, all loaded`);
 check(st3.textureTiles > 0 && mapHits >= st3.textureTiles, `map tiles draped: ${st3.textureTiles} (requested ${mapHits})`);
 check(st3.vertices > 4000 && st3.skirt > 100, `terrain mesh: ${st3.vertices} vertices, skirt ring of ${st3.skirt}`);
-check(st3.huts === 2, `2 huts in the scene (got ${st3.huts})`);
+check(st3.huts === 4, `4 huts in the scene (got ${st3.huts})`);
 check(st3.days === 2 && st3.photos === 5, `2 day tubes (single-photo day has no line), 5 photo spheres (got ${st3.days}, ${st3.photos})`);
 const hAt = await page.evaluate(() => window.__hike.view3d().heightAt(46.55, 12.01));
 check(near(hAt, 1500, 0.01), `elevation decoded from terrarium: ${hAt} m`);

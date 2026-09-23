@@ -863,24 +863,34 @@
     });
     return { segs: segs };
   }
+  // Nodes carry lat/lon; ways and relations (building outlines) carry a center from "out center".
+  // A hut mapped twice (a point and its building) within 150 m under one name is kept once.
   function parseHuts(json) {
     var out = [];
     (json.elements || []).forEach(function (el) {
-      if (el.type !== 'node' || !isFinite(el.lat) || !isFinite(el.lon)) return;
+      var lat = isFinite(el.lat) ? el.lat : el.center && el.center.lat, lon = isFinite(el.lon) ? el.lon : el.center && el.center.lon;
+      if (!isFinite(lat) || !isFinite(lon)) return;
       var t = el.tags || {};
       var name = t.name || t['name:it'] || t['name:de'] || t['name:en'] || '';
       if (!name) return;
+      name = name.slice(0, 60);
       var ele = parseFloat(t.ele);
-      out.push({ lat: el.lat, lon: el.lon, name: name.slice(0, 60), ele: isFinite(ele) ? Math.round(ele) : null });
+      var dup = out.some(function (h) { return h.name.toLowerCase() === name.toLowerCase() && haversineKm(h, { lat: lat, lon: lon }) * 1000 < 150; });
+      if (!dup) out.push({ lat: lat, lon: lon, name: name, ele: isFinite(ele) ? Math.round(ele) : null });
     });
     return out;
   }
   function fetchHuts() {
     var b = bounds3d();
     if (!b) return;
-    var pad = 0.02;
-    var q = '[out:json][timeout:60];node["tourism"~"^(alpine_hut|wilderness_hut)$"](' +
-      (b.south - pad) + ',' + (b.west - pad) + ',' + (b.north + pad) + ',' + (b.east + pad) + ');out body;';
+    var pad = 0.02, bb = (b.south - pad) + ',' + (b.west - pad) + ',' + (b.north + pad) + ',' + (b.east + pad);
+    // Points, building outlines and relations: huts by tag, plus anything named like a hut that is
+    // tagged as lodging or food instead (many Dolomite rifugi are hotels or restaurants in OSM).
+    var q = '[out:json][timeout:60];(' +
+      'nwr["tourism"~"^(alpine_hut|wilderness_hut)$"](' + bb + ');' +
+      'nwr["name"~"rifugio|rif\\\\. |hütte|huette|malga|baita|refuge",i]["tourism"](' + bb + ');' +
+      'nwr["name"~"rifugio|rif\\\\. |hütte|huette|malga|baita|refuge",i]["amenity"~"^(restaurant|cafe|bar|shelter)$"](' + bb + ');' +
+      ');out center;';
     setMsg('Fetching huts from OpenStreetMap…');
     $('btn-huts').disabled = true;
     overpass(q).then(function (json) {
