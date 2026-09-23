@@ -362,8 +362,10 @@ check(legacy.points.length === 2 && legacy.points[1].lon === 12.01, 'comma form 
 // ---- 10. trails + elevation via mocked BRouter ----
 console.log('10. trails + elevation (mocked BRouter)');
 const ELE = [1000, 1005, 1003, 1020, 1015, 1050, 1049, 1030];      // hysteresis 8 m: up 50, down 20
-const eg = await page.evaluate(e => window.__hike.elevationGain(e.map(x => [0, 0, x])), ELE);
-check(eg.up === 50 && eg.down === 20, `elevation gain with hysteresis: up ${eg.up} down ${eg.down}`);
+const eg = await page.evaluate(e => window.__hike.elevationGain(e.map(x => [0, 0, x]), 8), ELE);
+check(eg.up === 50 && eg.down === 20, `elevation gain with an 8 m threshold: up ${eg.up} down ${eg.down}`);
+const eg1 = await page.evaluate(e => window.__hike.elevationGain(e.map(x => [0, 0, x])), ELE);
+check(eg1.up === 57 && eg1.down === 27, `recordings use a 1 m threshold: up ${eg1.up} down ${eg1.down}`);
 const dw = await page.evaluate(() => window.__hike.dayWaypoints([{ lat: 46.5, lon: 12 }, { lat: 46.50005, lon: 12 }, { lat: 46.51, lon: 12 }]).length);
 check(dw === 2, `waypoints within 40 m collapse (got ${dw})`);
 const brReqs = [];
@@ -485,7 +487,7 @@ const rmsg = await page.locator('#msg').innerText();
 check(/fixture-strava\.gpx: .*Sep 20 3\.4 km, .*Sep 21 2\.4 km\./.test(rmsg), `two days reported: ${rmsg}`);
 check((await page.locator('#days .tag').count()) === 2 && (await lines('recorded')) === 2 && (await lines('straight')) === 1, 'days 1 and 2 recorded, day 3 straight');
 const rd = await page.evaluate(() => window.__hike.days());
-check(rd[0].trail.recorded && rd[0].trail.n === 200 && rd[0].trail.up >= 492 && rd[0].trail.up <= 500 && rd[0].trail.down >= 85 && rd[0].trail.down <= 100, `day 1 from the recording: ${rd[0].trail.n} points, up ${rd[0].trail.up}, down ${rd[0].trail.down}`);
+check(rd[0].trail.recorded && rd[0].trail.n === 200 && rd[0].trail.up >= 497 && rd[0].trail.up <= 500 && rd[0].trail.down >= 97 && rd[0].trail.down <= 100, `day 1 from the recording: ${rd[0].trail.n} points, up ${rd[0].trail.up}, down ${rd[0].trail.down}`);
 check(rd[0].dur === 199 * 30000 && rd[1].dur === 99 * 30000, 'day durations from the recording');
 const rtotal = await page.evaluate(() => window.__hike.timelineTotal());
 check(rtotal === (199 + 99) * 30000 + 60000, `walk time from recordings: ${rtotal / 60000} min`);

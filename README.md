@@ -70,9 +70,9 @@ absolute, so they line up with a recorded GPX taken in another time zone. It rea
   split by calendar day, thinned to one point per 5 m (or 60 s), and used as
   that day's track: the real path, the real pace on the timeline, and ascent
   and descent from the recording's own elevation. Distance is measured on
-  every recorded point before thinning, counting a point only once it is 2 m
+  every recorded point before thinning, counting a point only once it is 3 m
   from the last counted one, so second-by-second GPS jitter does not add
-  kilometres (a raw sum over a one-second recording overstates by 20–40 %). A recorded day is tagged
+  kilometres (a raw sum over a one-second recording overstates by 10–30 %). A recorded day is tagged
   **GPS** in the day list, is never sent to the router, and shows up even
   when no photo was taken that day. Recordings are kept on the device;
   **Clear recordings** forgets them. A GPX without timestamps (a planned
@@ -96,12 +96,26 @@ absolute, so they line up with a recorded GPX taken in another time zone. It rea
   threshold method: a running level starts at the first elevation and moves
   only when the track is at least a threshold above or below it; each move
   counts in full and smaller wobbles are ignored. Recorded days use the
-  recording's own (usually barometric) elevations with an 8 m threshold. On
+  recording's own (usually barometric) elevations with a 1 m threshold. On
   routed days the elevations are terrain-model samples at every trail vertex,
   which are noisier over rough ground, so they are first averaged over ±30 m
   along the line and then thresholded at 10 m, the same descent buffer
   BRouter itself uses for its "filtered ascend". Expect routed days to read
-  somewhat higher than a barometer would. Results are cached on the device per set of photo
+  somewhat higher than a barometer would.
+
+  Calibration, on three Strava exports of this trip against the figures
+  Strava displays for them (Strava's own totals are not in the files):
+
+  | activity | Strava | page | error |
+  |---|---|---|---|
+  | 3.18 km, 28 m | 3.18 km / 28 m | 3.09 km / 29 m | −3 % / +4 % |
+  | 17.24 km, 796 m | 17.24 km / 796 m | 17.12 km / 718 m | −1 % / −10 % |
+  | 11.05 km, 705 m | 11.05 km / 705 m | 11.51 km / 687 m | +4 % / −3 % |
+
+  For the middle activity Strava's ascent exceeds the raw sum of every rise
+  in its own export (748 m), so no method on the file can reach it; Strava
+  evidently computed it from a different elevation stream. The thresholds
+  were chosen to minimise the largest error across the three. Results are cached on the device per set of photo
   positions, so it runs once. Ten positions go in one request (the public
   server allows 60 s per request and mountain legs are slow); longer days are
   split and joined. A photo taken off any mapped path makes the

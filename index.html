@@ -139,11 +139,13 @@
   var TRAILS_KEY = 'hike-map.trails.v1';
   var REC_KEY = 'hike-map.recorded.v1';
   var REC_MIN_M = 5, REC_MAX_GAP_MS = 60000, REC_MAX_PTS = 4000;
-  var DIST_STEP_M = 2;         // distance counts a recorded point once it is 2 m from the last counted one: GPS jitter is not walking
+  var DIST_STEP_M = 3;         // distance counts a recorded point once it is 3 m from the last counted one: within 5 % of Strava on all three
   var DEM_HYST_M = 10, DEM_SMOOTH_M = 30;   // routed days: terrain-model elevations are smoothed over ±30 m and thresholded at 10 m
   var BROUTER = 'https://brouter.de/brouter';
   var PROFILES = ['hiking-mountain', 'trekking'];     // tried in order
-  var WP_MIN_M = 40, WP_PER_REQUEST = 10, ELE_HYST_M = 8, FETCH_TIMEOUT_MS = 75000;
+  var WP_MIN_M = 40, WP_PER_REQUEST = 10, FETCH_TIMEOUT_MS = 75000;
+  // Calibrated on three Strava exports against the figures Strava shows for them (see README):
+  var ELE_HYST_M = 1;          // recordings: barometric streams are already smooth; 1 m keeps ascent within 10 % of Strava
   var autoRoutedFor = '';
 
   // ---------- state ----------
