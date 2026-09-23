@@ -139,6 +139,8 @@
   var TRAILS_KEY = 'hike-map.trails.v1';
   var REC_KEY = 'hike-map.recorded.v1';
   var REC_MIN_M = 5, REC_MAX_GAP_MS = 60000, REC_MAX_PTS = 4000;
+  var DIST_STEP_M = 2;         // distance counts a recorded point once it is 2 m from the last counted one: GPS jitter is not walking
+  var DEM_HYST_M = 10, DEM_SMOOTH_M = 30;   // routed days: terrain-model elevations are smoothed over ±30 m and thresholded at 10 m
   var BROUTER = 'https://brouter.de/brouter';
   var PROFILES = ['hiking-mountain', 'trekking'];     // tried in order
   var WP_MIN_M = 40, WP_PER_REQUEST = 10, ELE_HYST_M = 8, FETCH_TIMEOUT_MS = 75000;
@@ -308,21 +310,43 @@
     return out;
   }
   function wpHash(wps) { return wps.map(function (p) { return p.lat.toFixed(5) + ',' + p.lon.toFixed(5); }).join('|'); }
-  // Ascent and descent with hysteresis: a move only counts once it exceeds ELE_HYST_M from the last counted level.
-  function elevationGain(coords) {
-    var up = 0, down = 0, base = null;
+  // Ascent and descent with a threshold: a running level moves only when the track is at least
+  // `hyst` metres above or below it, and each move counts in full.
+  function elevationGain(coords, hyst) {
+    var th = hyst || ELE_HYST_M, up = 0, down = 0, base = null;
     coords.forEach(function (c) {
       var e = c[2];
       if (typeof e !== 'number' || !isFinite(e)) return;
       if (base === null) { base = e; return; }
-      if (e - base >= ELE_HYST_M) { up += e - base; base = e; }
-      else if (base - e >= ELE_HYST_M) { down += base - e; base = e; }
+      if (e - base >= th) { up += e - base; base = e; }
+      else if (base - e >= th) { down += base - e; base = e; }
     });
     return { up: Math.round(up), down: Math.round(down) };
+  }
+  // Elevation averaged over the points within ±radius metres along the line (for terrain-model profiles).
+  function smoothElevation(coords, radiusM) {
+    var d = [0];
+    for (var i = 1; i < coords.length; i++) d.push(d[i - 1] + haversineKm({ lat: coords[i - 1][0], lon: coords[i - 1][1] }, { lat: coords[i][0], lon: coords[i][1] }) * 1000);
+    return coords.map(function (c, i) {
+      var sum = 0, n = 0;
+      for (var j = i; j >= 0 && d[i] - d[j] <= radiusM; j--) if (isFinite(coords[j][2])) { sum += coords[j][2]; n++; }
+      for (j = i + 1; j < coords.length && d[j] - d[i] <= radiusM; j++) if (isFinite(coords[j][2])) { sum += coords[j][2]; n++; }
+      return [c[0], c[1], n ? sum / n : NaN];
+    });
   }
   function coordsKm(coords) {
     var d = 0;
     for (var i = 1; i < coords.length; i++) d += haversineKm({ lat: coords[i - 1][0], lon: coords[i - 1][1] }, { lat: coords[i][0], lon: coords[i][1] });
+    return d;
+  }
+  // Distance of a raw recording: a point adds to the distance only once it is DIST_STEP_M from the last
+  // counted point, so second-by-second GPS jitter around a standing walker is not counted as walking.
+  function recordedKm(pts) {
+    var d = 0, last = pts[0];
+    for (var i = 1; i < pts.length; i++) {
+      var s = haversineKm(last, pts[i]);
+      if (s * 1000 >= DIST_STEP_M || i === pts.length - 1) { d += s; last = pts[i]; }
+    }
     return d;
   }
   function dayKey(t) {
@@ -844,10 +868,11 @@
     all.forEach(function (p) { var k = dayKey(p.t); (byDay[k] = byDay[k] || []).push(p); });
     var keys = Object.keys(byDay).sort();
     keys.forEach(function (k) {
+      var km = recordedKm(byDay[k]);                     // from every point, before thinning
       var pts = thinTrack(byDay[k]);
       var coords = pts.map(function (p) { return [p.lat, p.lon, p.ele, p.t]; });
       var gain = elevationGain(coords);
-      recorded[k] = { coords: coords, km: coordsKm(coords), up: gain.up, down: gain.down, name: fileName || parsed.name };
+      recorded[k] = { coords: coords, km: km, up: gain.up, down: gain.down, name: fileName || parsed.name };
     });
     return keys;
   }
@@ -892,6 +917,8 @@
     if (g.trail && g.trail.times && g.trail.coords.length > 1) {
       path = g.trail.coords.map(function (c, ci) { return { lat: c[0], lon: c[1], ele: c[2], d: 0, t: g.trail.times[ci] }; });
       for (i = 1; i < path.length; i++) path[i].d = path[i - 1].d + haversineKm(path[i - 1], path[i]);
+      var thinned = path[path.length - 1].d, scale = thinned > 0 && g.trail.km ? g.trail.km / thinned : 1;
+      path.forEach(function (x) { x.d *= scale; });      // the thinned line is a little shorter than the walk
       return path;
     }
     var pts = g.pts.filter(function (p) { return !isNaN(p.t); });
@@ -1106,7 +1133,7 @@
         return routeChunk(chunk).then(function (coords) { return acc.concat(acc.length ? coords.slice(1) : coords); });
       });
     }, Promise.resolve([])).then(function (coords) {
-      var gain = elevationGain(coords);
+      var gain = elevationGain(smoothElevation(coords, DEM_SMOOTH_M), DEM_HYST_M);
       return { coords: coords, km: coordsKm(coords), up: gain.up, down: gain.down };
     });
   }
@@ -1226,7 +1253,7 @@
   window.__hike = {
     points: function () { return sortByTime(points); },
     days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, dur: g.dur, color: g.color, wps: g.wps.length, trail: g.trail ? { n: g.trail.coords.length, km: g.trail.km, up: g.trail.up, down: g.trail.down, recorded: !!g.trail.recorded } : null }; }); },
-    thinTrack: thinTrack,
+    thinTrack: thinTrack, recordedKm: recordedKm, smoothElevation: smoothElevation,
     tileMode: function () { return TILE_MODES[tileMode].name; }, setCustomTiles: function (u) { localStorage.setItem(CUSTOM_TILES_KEY, u); },
     view3d: function () { return view3d; }, bounds3d: bounds3d, mapCenter: function () { var c = map.getCenter(); return { lat: c.lat, lon: c.lng, zoom: map.getZoom() }; },
     elevationGain: elevationGain, dayWaypoints: dayWaypoints,

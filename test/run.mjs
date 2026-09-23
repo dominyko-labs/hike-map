@@ -508,6 +508,14 @@ fs.writeFileSync(rec3, routeGpx);
 await page.setInputFiles('#rec-file', rec3);
 await page.waitForFunction(() => document.getElementById('msg').textContent.includes('fixture-planned.gpx'));
 check((await page.locator('#msg').innerText()).includes('no timestamps, loaded as the reference route') && (await lines('ref-route')) === 2, 'planned GPX becomes the dashed reference');
+// GPS jitter must not count as distance: a 2 km walk north sampled every second with ±0.6 m noise
+const jit = []; let seed = 7; const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 - 0.5; };
+for (let i = 0; i <= 2000; i++) jit.push({ lat: 46.7 + i / 110574 + rnd() * 1.2 / 110574, lon: 12.6 + rnd() * 1.2 / (111320 * Math.cos(46.7 * Math.PI / 180)), t: i * 1000, ele: 1000 });
+const jk = await page.evaluate(pts => ({ counted: window.__hike.recordedKm(pts), raw: window.__hike.totalKm(pts) }), jit);
+check(jk.raw > 2.15 && Math.abs(jk.counted - 2.0) < 0.1, `jittered 2 km walk: raw sum ${jk.raw.toFixed(2)} km, counted ${jk.counted.toFixed(2)} km`);
+const sm = await page.evaluate(() => window.__hike.smoothElevation([[46.7, 12.6, 1000], [46.70009, 12.6, 1030], [46.70018, 12.6, 1000], [46.7009, 12.6, 1100]], 30).map(c => Math.round(c[2])));
+// points at 0, 10, 20 and 100 m: the first three average each other, the last stands alone
+check(sm.join(',') === '1010,1010,1010,1100', `terrain smoothing over ±30 m: ${sm}`);
 const thin = await page.evaluate(() => window.__hike.thinTrack([{ lat: 46.5, lon: 12, t: 0 }, { lat: 46.500001, lon: 12, t: 1000 }, { lat: 46.500002, lon: 12, t: 2000 }]).length);
 check(thin === 2, `points within 5 m and 60 s collapse to first and last (got ${thin})`);
 await page.click('#btn-clear-rec');

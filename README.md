@@ -69,7 +69,10 @@ absolute, so they line up with a recorded GPX taken in another time zone. It rea
   recorded by Strava, AllTrails, a watch or any tracking app. Each file is
   split by calendar day, thinned to one point per 5 m (or 60 s), and used as
   that day's track: the real path, the real pace on the timeline, and ascent
-  and descent from the recording's own elevation. A recorded day is tagged
+  and descent from the recording's own elevation. Distance is measured on
+  every recorded point before thinning, counting a point only once it is 2 m
+  from the last counted one, so second-by-second GPS jitter does not add
+  kilometres (a raw sum over a one-second recording overstates by 20–40 %). A recorded day is tagged
   **GPS** in the day list, is never sent to the router, and shows up even
   when no photo was taken that day. Recordings are kept on the device;
   **Clear recordings** forgets them. A GPX without timestamps (a planned
@@ -91,10 +94,14 @@ absolute, so they line up with a recorded GPX taken in another time zone. It rea
   not be routed and why; the **Trails + elevation** button retries those. Each day then shows its trail distance and **↑ ascent ↓
   descent**, and the stats line sums the ascent. Ascent and descent use a
   threshold method: a running level starts at the first elevation and moves
-  only when the track is at least 8 m above or below it; each move counts in
-  full. Wobbles under 8 m are ignored. On routed days the elevations come from
-  a terrain model sampled at every trail vertex and can overstate rough
-  ground; recorded days use the recording's own (usually barometric) values. Results are cached on the device per set of photo
+  only when the track is at least a threshold above or below it; each move
+  counts in full and smaller wobbles are ignored. Recorded days use the
+  recording's own (usually barometric) elevations with an 8 m threshold. On
+  routed days the elevations are terrain-model samples at every trail vertex,
+  which are noisier over rough ground, so they are first averaged over ±30 m
+  along the line and then thresholded at 10 m, the same descent buffer
+  BRouter itself uses for its "filtered ascend". Expect routed days to read
+  somewhat higher than a barometer would. Results are cached on the device per set of photo
   positions, so it runs once. Ten positions go in one request (the public
   server allows 60 s per request and mountain legs are slow); longer days are
   split and joined. A photo taken off any mapped path makes the
