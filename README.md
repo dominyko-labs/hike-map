@@ -130,9 +130,8 @@ absolute, so they line up with a recorded GPX taken in another time zone. It rea
   malga, baita, refuge) that is tagged as lodging or food instead, and keeps the
   named ones within 1.2 km of a walked line or photo. They appear as brown
   pins with their names on the map (tap for the altitude) and as labelled
-  pins in 3D, and are kept on the device. Rifugi that OpenStreetMap tags
-  differently (some are `tourism=hotel` or `amenity=restaurant`) will be
-  missing; tell me which and the query can be widened.
+  pins in 3D, and are kept on the device. Tapping the button again refreshes
+  them.
 * **3D.** The **3D** button swaps the map for a terrain view: elevation from
   the [AWS Open Data terrain tiles](https://registry.opendata.aws/terrain-tiles/)
   (Mapzen/Tilezen Terrarium PNGs, no key), OpenTopoMap draped over it one
