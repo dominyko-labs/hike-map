@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { execSync } from 'node:child_process';
+import zlib from 'node:zlib';
 
 const require = createRequire(import.meta.url);
 let playwright;
@@ -98,6 +99,21 @@ const routeGpx = `<?xml version="1.0"?><gpx version="1.1" creator="t"><metadata>
 <trk><name>Alta Via 1 test</name>
 <trkseg><trkpt lat="46.50" lon="12.00"/><trkpt lat="46.53" lon="12.00"/><trkpt lat="46.55" lon="12.00"/></trkseg>
 <trkseg><trkpt lat="46.55" lon="12.00"/><trkpt lat="46.60" lon="12.00"/></trkseg></trk></gpx>`;
+
+// ---- PNG encoder for tile mocks (8-bit RGB, no dependencies) ----
+const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+const crc32 = buf => { let c = 0xFFFFFFFF; for (const b of buf) c = crcTable[(c ^ b) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+function png(w, h, rgbAt) {
+  const raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const [r, g, b] = rgbAt(x, y), o = y * (w * 3 + 1) + 1 + x * 3; raw[o] = r; raw[o + 1] = g; raw[o + 2] = b; }
+  const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const td = Buffer.concat([Buffer.from(type), data]); const c = Buffer.alloc(4); c.writeUInt32BE(crc32(td)); return Buffer.concat([len, td, c]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+// Terrarium encoding: value = (R * 256 + G + B / 256) - 32768
+const terrarium = metres => { const v = metres + 32768; const r = Math.floor(v / 256), g = Math.floor(v - r * 256), b = Math.round((v - r * 256 - g) * 256); return [r, g, b]; };
+const DEM_PNG = png(256, 256, () => terrarium(1500));
+const MAP_PNG = png(256, 256, (x, y) => [200, 220 - (y >> 3), 160 + (x >> 3)]);
 
 // ---- static server ----
 const server = http.createServer((req, res) => {
@@ -498,6 +514,54 @@ await page.click('#btn-clear-rec');
 check((await page.locator('#days .tag').count()) === 0 && (await lines('recorded')) === 0 && (await page.locator('#days li').count()) === 3, 'recordings cleared');
 await page.click('#btn-clear-route');
 for (const f of [rec1, rec2, rec3]) fs.unlinkSync(f);
+
+// ---- 13. 3D terrain view (mocked terrain and map tiles) ----
+console.log('13. 3D terrain view');
+await page.goto(base + hash); await page.reload(); await ready();
+await page.waitForFunction(() => document.getElementById('msg2').textContent.includes('days on trails'));
+let demHits = 0, mapHits = 0, demMode = 'ok', mapMode = 'ok';
+await page.route('**/elevation-tiles-prod/terrarium/**', r => { demHits++; demMode === 'ok' ? r.fulfill({ contentType: 'image/png', body: DEM_PNG }) : r.fulfill({ status: 404, body: '' }); });
+await page.route('**/tile.openstreetmap.org/**', r => { mapHits++; mapMode === 'ok' ? r.fulfill({ contentType: 'image/png', body: MAP_PNG }) : r.fulfill({ status: 404, body: '' }); });
+const b3 = await page.evaluate(() => window.__hike.bounds3d());
+check(b3 && b3.south < 46.52 && b3.north > 46.62 && b3.west < 12 && b3.east > 12.04, `bounds cover the photos with padding (${JSON.stringify(b3)})`);
+check(await page.locator('#btn-3d').isVisible() && (await page.locator('#btn-3d').innerText()) === '3D', '3D button offered');
+demHits = 0; mapHits = 0;
+await page.click('#btn-3d');
+await page.waitForFunction(() => document.getElementById('btn-3d').textContent === 'Map' || /failed/.test(document.getElementById('msg').textContent), null, { timeout: 120000 });
+const m3 = await page.locator('#msg').innerText();
+check(m3.startsWith('3D: ') && !m3.includes('failed'), `3D built: ${m3}`);
+const st3 = await page.evaluate(() => window.__hike.view3d().state());
+check(st3.z === 14 && st3.tiles === demHits && st3.missing === 0 && st3.tiles <= 36, `terrain: ${st3.tiles} tiles at zoom ${st3.z}, all loaded`);
+check(st3.textureTiles > 0 && mapHits >= st3.textureTiles, `map tiles draped: ${st3.textureTiles} (requested ${mapHits})`);
+check(st3.vertices === st3.tiles / 3 * 33 * 33 || st3.vertices > 1000, `terrain mesh: ${st3.vertices} vertices`);
+check(st3.days === 2 && st3.photos === 5, `2 day tubes (single-photo day has no line), 5 photo spheres (got ${st3.days}, ${st3.photos})`);
+const hAt = await page.evaluate(() => window.__hike.view3d().heightAt(46.55, 12.01));
+check(near(hAt, 1500, 0.01), `elevation decoded from terrarium: ${hAt} m`);
+check(near(st3.minH, 1500, 0.01) && near(st3.maxH, 1500, 0.01), 'flat mocked terrain');
+check(await page.locator('#map').isHidden() && await page.locator('#map3d canvas').isVisible(), 'canvas shown in place of the map');
+await page.evaluate(v => window.__hike.setTimeline(v), v30);
+const st3w = await page.evaluate(() => window.__hike.view3d().state());
+const w3 = st3w.walker;
+check(w3 && w3.y > 1512 * 1.25 && w3.y < 1512 * 1.25 + 600, `walker placed above the surface at ${w3 && w3.y.toFixed(0)} (surface ${(1512 * 1.25).toFixed(0)})`);
+check(st3w.segments[0] >= 50 && Math.abs(st3w.segmentsDrawn[0] - st3w.segments[0] / 2) <= 1 && st3w.segmentsDrawn[1] === st3w.segments[1], `day 1 densified to ${st3w.segments[0]} segments and drawn half-way, day 2 full but faded (${st3w.segmentsDrawn}/${st3w.segments})`);
+await page.evaluate(() => window.__hike.setTimeline(10000));
+check((await page.evaluate(() => window.__hike.view3d().state().walker)) === null, 'walker hidden at the end');
+await page.click('#btn-3d');
+check((await page.evaluate(() => window.__hike.view3d())) === null && await page.locator('#map').isVisible() && (await page.locator('#map3d canvas').count()) === 0, 'back to the map, 3D disposed');
+// map tiles unavailable: height colours instead
+mapMode = '404';
+await page.click('#btn-3d');
+await page.waitForFunction(() => document.getElementById('btn-3d').textContent === 'Map' || /failed/.test(document.getElementById('msg').textContent), null, { timeout: 120000 });
+const st3b = await page.evaluate(() => window.__hike.view3d() && window.__hike.view3d().state());
+check(st3b && st3b.textureTiles === 0 && (await page.locator('#msg').innerText()).includes('height colours'), 'no map tiles: falls back to height colours');
+await page.click('#btn-3d');
+// terrain unavailable: failure reported, map back
+demMode = '404'; mapMode = 'ok';
+await page.click('#btn-3d');
+await page.waitForFunction(() => /failed/.test(document.getElementById('msg').textContent) || document.getElementById('btn-3d').textContent === 'Map', null, { timeout: 120000 });
+check((await page.locator('#msg').innerText()).includes('3D view failed: no terrain tiles') && await page.locator('#map').isVisible() && await page.locator('#btn-3d').isEnabled(), 'no terrain: failure named, map restored');
+await page.unroute('**/elevation-tiles-prod/terrarium/**'); await page.unroute('**/tile.openstreetmap.org/**');
+demMode = 'ok';
 
 // ---- 9. tiles toggle and layout ----
 console.log('9. tiles and layout');

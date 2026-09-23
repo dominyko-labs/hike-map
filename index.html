@@ -7,6 +7,7 @@
 <title>Hike Map</title>
 <meta name="description" content="Draws the path and photo pins of a multi-day hike from the GPS metadata of your photos, against a reference route.">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<script type="importmap">{ "imports": { "three": "./vendor/three/three.module.js" } }</script>
 <style>
   :root {
     --bg: #f6f5f2; --panel: #ffffff; --ink: #1c1b18; --muted: #6b6860; --line: #e2dfd8;
@@ -33,6 +34,8 @@
     display: flex; flex-direction: column; overflow: hidden;
   }
   #map { flex: 1 1 auto; min-height: 45vh; background: var(--bg); }
+  #map3d { flex: 1 1 auto; min-height: 45vh; background: #dfe9f3; position: relative; touch-action: none; }
+  #map3d canvas { display: block; }
   #panel {
     flex: 0 0 auto; max-height: 48vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
     background: var(--panel); box-shadow: var(--shadow); border-top: 1px solid var(--line);
@@ -75,6 +78,7 @@
 </head>
 <body>
 <div id="map" role="application" aria-label="Map of the hike"></div>
+<div id="map3d" class="hidden" role="application" aria-label="3D terrain view of the hike"></div>
 <section id="panel">
   <h1 id="title">Hike Map</h1>
   <div id="stats" class="stats hidden">
@@ -112,6 +116,7 @@
     <button id="btn-route-gpx" class="hidden" type="button">Save route GPX</button>
     <button id="btn-clear-route" class="hidden" type="button">Clear route</button>
     <button id="btn-tiles" type="button">Map: Street</button>
+    <button id="btn-3d" class="hidden" type="button">3D</button>
   </div>
   <p id="msg" role="status" aria-live="polite"></p>
   <p id="msg2" role="status" aria-live="polite"></p>
@@ -159,6 +164,7 @@
   var routing = false;
   var progressLayer, dayLines = [], markerRefs = [], tlDays = [], tlTotal = 0, playing = false, playHandle = null;
   var TL_MAX = 10000, DAY_PLAY_MS = 5000, MIN_DAY_MS = 60000;
+  var view3d = null, view3dBusy = false;
 
   // ---------- parsing ----------
   function parseTime(s) {
@@ -690,6 +696,7 @@
     $('s-up-wrap').classList.toggle('hidden', !anyTrail);
     buildTimeline();
     $('btn-trails').classList.toggle('hidden', !has);
+    $('btn-3d').classList.toggle('hidden', !has && !view3d);
     $('btn-trails').textContent = dayGroups.every(function (g) { return g.trail || g.wps.length < 2; }) ? 'Trails ✓' : 'Trails + elevation';
 
     var ul = $('days');
@@ -951,8 +958,9 @@
       var reached = atEnd || r.day < pos.day.gi || (r.day === pos.day.gi && (isNaN(r.t) || r.t <= pos.t));
       r.m.setStyle({ opacity: reached ? 1 : .25, fillOpacity: reached ? 1 : .25 });
     });
-    if (atEnd) { $('tl-label').textContent = ''; return; }
+    if (atEnd) { $('tl-label').textContent = ''; if (view3d) view3d.setProgress(null); return; }
     var g = dayGroups[pos.day.gi], path = pos.day.path;
+    if (view3d) view3d.setProgress({ day: pos.day.gi, frac: (pos.index + pos.frac) / Math.max(1, path.length - 1), lat: pos.lat, lon: pos.lon });
     var partial = path.slice(0, pos.index + 1).map(function (x) { return [x.lat, x.lon]; });
     partial.push([pos.lat, pos.lon]);
     L.polyline(partial, { color: g.color, weight: 5, opacity: 1, className: 'progress-line' }).addTo(progressLayer);
@@ -987,6 +995,58 @@
       playHandle = requestAnimationFrame(step);
     };
     playHandle = requestAnimationFrame(step);
+  }
+
+  // ---------- 3D terrain view (view3d.js, loaded on demand) ----------
+  function bounds3d() {
+    var lats = [], lons = [];
+    dayGroups.forEach(function (g) {
+      var path = buildPath(g);
+      (path.length ? path : g.pts).forEach(function (p) { lats.push(p.lat); lons.push(p.lon); });
+    });
+    if (!lats.length) return null;
+    var s = Math.min.apply(null, lats), n = Math.max.apply(null, lats), w = Math.min.apply(null, lons), e = Math.max.apply(null, lons);
+    var padLat = Math.max(0.01, (n - s) * 0.12), padLon = Math.max(0.015, (e - w) * 0.12);
+    return { south: s - padLat, north: n + padLat, west: w - padLon, east: e + padLon };
+  }
+  function enter3d() {
+    if (view3d || view3dBusy) return;
+    var b = bounds3d();
+    if (!b) return;
+    view3dBusy = true;
+    $('btn-3d').disabled = true;
+    setMsg('3D: loading…');
+    var mode = TILE_MODES[tileMode];
+    var texUrl = mode.custom ? customTilesUrl() : mode.url;
+    var days = dayGroups.map(function (g) {
+      var path = buildPath(g);
+      return { color: g.color, coords: (path.length ? path : g.pts).map(function (p) { return [p.lat, p.lon]; }), photos: g.pts.map(function (p) { return [p.lat, p.lon]; }) };
+    });
+    import('./view3d.js').then(function (m) {
+      $('map').classList.add('hidden');
+      $('map3d').classList.remove('hidden');
+      return m.build({ container: $('map3d'), bounds: b, days: days, textureUrl: texUrl, onProgress: setMsg });
+    }).then(function (v) {
+      view3d = v;
+      var st = v.state();
+      setMsg('3D: ' + st.tiles + ' terrain tiles at zoom ' + st.z + (st.textureTiles ? '' : ', map tiles unavailable, height colours instead') + '. Drag to pan, two fingers to tilt and zoom.');
+      $('btn-3d').textContent = 'Map';
+      applyTimeline(+$('tl').value);
+    }).catch(function (e) {
+      $('map3d').classList.add('hidden');
+      $('map').classList.remove('hidden');
+      map.invalidateSize();
+      setMsg('3D view failed: ' + e.message, true);
+    }).then(function () { view3dBusy = false; $('btn-3d').disabled = false; });
+  }
+  function exit3d() {
+    if (!view3d) return;
+    view3d.dispose(); view3d = null;
+    $('map3d').classList.add('hidden');
+    $('map').classList.remove('hidden');
+    map.invalidateSize();
+    $('btn-3d').textContent = '3D';
+    setMsg('');
   }
 
   // ---------- trails: route each day's photos along hiking paths with BRouter ----------
@@ -1150,6 +1210,7 @@
   $('btn-trails').addEventListener('click', routeAllDays);
   $('tl').addEventListener('input', function () { stopPlay(); applyTimeline(+this.value); });
   $('btn-play').addEventListener('click', togglePlay);
+  $('btn-3d').addEventListener('click', function () { if (view3d) exit3d(); else enter3d(); });
 
   // Exposed for the test-suite only.
   window.__hike = {
@@ -1157,6 +1218,7 @@
     days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, dur: g.dur, color: g.color, wps: g.wps.length, trail: g.trail ? { n: g.trail.coords.length, km: g.trail.km, up: g.trail.up, down: g.trail.down, recorded: !!g.trail.recorded } : null }; }); },
     thinTrack: thinTrack,
     tileMode: function () { return TILE_MODES[tileMode].name; }, setCustomTiles: function (u) { localStorage.setItem(CUSTOM_TILES_KEY, u); },
+    view3d: function () { return view3d; }, bounds3d: bounds3d,
     elevationGain: elevationGain, dayWaypoints: dayWaypoints,
     timelineAt: function (v) { var p = timelineAt(v); return p && { day: p.day.gi, t: p.t, lat: p.lat, lon: p.lon, ele: p.ele, km: p.km }; },
     timelineTotal: function () { return tlTotal; },

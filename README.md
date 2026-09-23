@@ -99,6 +99,16 @@ absolute, so they line up with a recorded GPX taken in another time zone. It rea
   routed keep their straight line and are named in the message.
 * **Download GPX** saves one track per day, on the routed trail with
   elevation where available, plus a waypoint per photo.
+* **3D.** The **3D** button swaps the map for a terrain view: elevation from
+  the [AWS Open Data terrain tiles](https://registry.opendata.aws/terrain-tiles/)
+  (Mapzen/Tilezen Terrarium PNGs, no key), the current map background draped
+  over it (height colours if the tiles cannot be read cross-origin), one tube
+  per day, a sphere per photo, and the timeline's walker on the surface, so ▶
+  plays the walk over the mountains. One finger pans, two fingers tilt, rotate
+  and zoom. Vertical scale is exaggerated 1.25×. The scene covers the whole
+  trip at the zoom that fits it in 36 terrain tiles; the module and three.js
+  (vendored under `vendor/three`, release r186) load only when the button is
+  first pressed. **Map** returns to the 2D view.
 * **Walk timeline.** The slider above the day list runs over the trip's
   walking time (the days back to back, nights skipped). Drag it and the map
   shows the walk up to that moment: the trail drawn so far in the day's
@@ -224,14 +234,16 @@ failure path), off-route detection, trail routing against a mocked BRouter (prof
 fallback, request chunking, elevation gain, caching, failure), the walk
 timeline (time-to-position mapping on straight and routed days, fading,
 play and pause), recorded GPX (splitting by day, thinning, elevation from the
-file, recorded-only days, planned GPX becoming the reference), persistence
-across reloads, the empty and malformed states, and the JPEG and HEIC Exif readers against fixtures it builds
+file, recorded-only days, planned GPX becoming the reference), the 3D view against generated terrain
+and map tiles in software WebGL (decoding, draping, tubes, walker height, both
+fallbacks), persistence across reloads, the empty and malformed states, and the JPEG and HEIC Exif readers against fixtures it builds
 byte by byte, including a HEIC whose Exif sits past the first megabyte. It
 resolves Playwright from the global npm root if it is not installed locally.
 
 Map tiles come from `tile.openstreetmap.org`, `opentopomap.org` and
 `tile.waymarkedtrails.org` at view time under their usage policies; fine for
-personal use. Route data fetched from
+personal use. Terrain for the 3D view comes from the AWS Open Data terrain
+tiles (Mapzen, various public sources, see their attribution). Route data fetched from
 Overpass and trails from BRouter are © OpenStreetMap contributors, ODbL; BRouter's
 elevation comes from public SRTM data.
 
