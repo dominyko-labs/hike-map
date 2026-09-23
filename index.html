@@ -180,6 +180,7 @@
   var PROFILES = ['hiking-mountain', 'trekking'];     // tried in order
   var WP_MIN_M = 40, WP_PER_REQUEST = 10, FETCH_TIMEOUT_MS = 75000;
   var EXT_MIN_M = 100, LINK_MIN_M = 60;   // route a recording's missing tail/head or a day-to-day link only past these gaps
+  var MAX_WALK_KMH = 7, WALK_SLACK_KM = 0.6;   // a photo is a waypoint only if it was reachable on foot since the previous point
   var links = [];       // [{from: dayIndex, to: dayIndex, coords, km}] routed between consecutive days
   // Calibrated on three Strava exports against the figures Strava shows for them (see README):
   var ELE_HYST_M = 1;          // recordings: barometric streams are already smooth; 1 m keeps ascent within 10 % of Strava
@@ -342,11 +343,18 @@
     });
     return Math.sqrt(best) * 1000;
   }
-  // Waypoints for the router: the day's photos in order, dropping any within WP_MIN_M of the previous.
+  // Could a walker have got from a to b in the time between them? (No time on either side: yes.)
+  function reachable(a, b) {
+    if (isNaN(a.t) || isNaN(b.t)) return true;
+    return haversineKm(a, b) <= WALK_SLACK_KM + MAX_WALK_KMH * Math.abs(b.t - a.t) / 3600000;
+  }
+  // Waypoints for the router: the day's photos in order, dropping any within WP_MIN_M of the previous
+  // and any that could not have been reached on foot (a stale GPS fix taken indoors, a lift, a car).
   function dayWaypoints(pts) {
-    var out = [];
+    var out = [], last = null;
     pts.forEach(function (p) {
-      if (!out.length || haversineKm(out[out.length - 1], p) * 1000 >= WP_MIN_M) out.push({ lat: p.lat, lon: p.lon });
+      if (last && !reachable(last, p)) return;
+      if (!last || haversineKm(last, p) * 1000 >= WP_MIN_M) { out.push({ lat: p.lat, lon: p.lon }); last = p; }
     });
     return out;
   }
@@ -414,9 +422,12 @@
       if (rec) {
         var rc = rec.coords, first = { lat: rc[0][0], lon: rc[0][1] }, last = { lat: rc[rc.length - 1][0], lon: rc[rc.length - 1][1] };
         var t0 = rc[0][3], t1 = rc[rc.length - 1][3];
-        var before = g.pts.filter(function (p) { return p.t < t0; }), after = g.pts.filter(function (p) { return p.t > t1; });
-        if (before.length && haversineKm(first, before[0]) * 1000 > EXT_MIN_M) g.wpsBefore = dayWaypoints(before.concat([first]));
-        if (after.length && haversineKm(last, after[after.length - 1]) * 1000 > EXT_MIN_M) g.wpsAfter = dayWaypoints([last].concat(after));
+        var startPt = { lat: first.lat, lon: first.lon, t: t0 }, endPt = { lat: last.lat, lon: last.lon, t: t1 };
+        var before = g.pts.filter(function (p) { return p.t < t0 && reachable(p, startPt); });
+        var after = g.pts.filter(function (p) { return p.t > t1 && reachable(endPt, p); });
+        g.ignored = g.pts.filter(function (p) { return (p.t < t0 && !reachable(p, startPt)) || (p.t > t1 && !reachable(endPt, p)); }).length;
+        if (before.length && haversineKm(first, before[0]) * 1000 > EXT_MIN_M) g.wpsBefore = dayWaypoints(before.concat([startPt]));
+        if (after.length && haversineKm(last, after[after.length - 1]) * 1000 > EXT_MIN_M) g.wpsAfter = dayWaypoints([endPt].concat(after));
         var extB = g.wpsBefore.length >= 2 ? trails['ext:' + wpHash(g.wpsBefore)] : null;
         var extA = g.wpsAfter.length >= 2 ? trails['ext:' + wpHash(g.wpsAfter)] : null;
         var coords = [], times = [];
@@ -425,9 +436,10 @@
         if (extA) { extA.coords.slice(1).forEach(function (c) { coords.push([c[0], c[1], c[2]]); times.push(NaN); }); }
         g.trail = { coords: coords, times: times, km: rec.km + (extB ? extB.km : 0) + (extA ? extA.km : 0),
                     up: rec.up + (extB ? extB.up : 0) + (extA ? extA.up : 0), down: rec.down + (extB ? extB.down : 0) + (extA ? extA.down : 0),
-                    recorded: true, extended: !!(extA || extB) };
+                    recorded: true, extended: !!(extA || extB), recKm: rec.km, extKm: (extB ? extB.km : 0) + (extA ? extA.km : 0) };
       } else {
         g.trail = trails[wpHash(g.wps)] || null;
+        g.ignored = g.pts.length - g.pts.filter(function (p, i, arr) { return i === 0 || reachable(arr[i - 1], p); }).length;
       }
       g.km = g.trail ? g.trail.km : totalKm(g.pts);
       var timed = g.pts.filter(function (p) { return !isNaN(p.t); });
@@ -839,7 +851,9 @@
       li.innerHTML = '<span class="sw" style="background:' + g.color + '"></span>' +
         '<span class="d">Day ' + (i + 1) + ' · ' + esc(fmtDay(g.key)) + (g.trail && g.trail.recorded ? '<span class="tag">GPS</span>' : '') + '</span>' +
         '<span class="m">' + g.pts.length + ' · ' + g.km.toFixed(1) + ' km · ' + fmtDuration(g.dur) +
-        (g.trail ? '<small>↑ ' + g.trail.up + ' m ↓ ' + g.trail.down + ' m</small>' : '') + '</span>';
+        (g.trail ? '<small>↑ ' + g.trail.up + ' m ↓ ' + g.trail.down + ' m' +
+          (g.trail.extended ? ' · ' + g.trail.recKm.toFixed(1) + ' recorded + ' + g.trail.extKm.toFixed(1) + ' routed' : '') +
+          (g.ignored ? ' · ' + g.ignored + ' photo' + (g.ignored === 1 ? '' : 's') + ' too far to walk, ignored' : '') + '</small>' : '') + '</span>';
       li.addEventListener('click', function () {
         var b = g.trail ? g.trail.coords.map(function (c) { return [c[0], c[1]]; }) : g.pts.map(function (p) { return [p.lat, p.lon]; });
         map.fitBounds(L.latLngBounds(b).pad(0.2), { maxZoom: 15 });
@@ -1114,7 +1128,9 @@
       path.forEach(function (x) { x.d *= scale; });      // the thinned line is a little shorter than the walk
       if (g.trail.extended) {
         var known = g.trail.times.filter(function (t) { return !isNaN(t); }), kt0 = Math.min.apply(null, known), kt1 = Math.max.apply(null, known);
-        fillTimes(path, pts.filter(function (p) { return p.t < kt0 || p.t > kt1; }));
+        var k0 = g.trail.times.indexOf(kt0), k1 = g.trail.times.lastIndexOf(kt1);
+        var sPt = { lat: path[k0].lat, lon: path[k0].lon, t: kt0 }, ePt = { lat: path[k1].lat, lon: path[k1].lon, t: kt1 };
+        fillTimes(path, pts.filter(function (p) { return (p.t < kt0 && reachable(p, sPt)) || (p.t > kt1 && reachable(ePt, p)); }));   // the same photos the extension was routed through
       }
       return path;
     }
@@ -1597,7 +1613,8 @@
   // Exposed for the test-suite only.
   window.__hike = {
     points: function () { return sortByTime(points); },
-    days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, dur: g.dur, color: g.color, wps: g.wps.length, wpsAfter: g.wpsAfter.length, wpsBefore: g.wpsBefore.length, trail: g.trail ? { n: g.trail.coords.length, km: g.trail.km, up: g.trail.up, down: g.trail.down, recorded: !!g.trail.recorded, extended: !!g.trail.extended } : null }; }); },
+    days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, dur: g.dur, color: g.color, wps: g.wps.length, wpsAfter: g.wpsAfter.length, wpsBefore: g.wpsBefore.length, ignored: g.ignored || 0, trail: g.trail ? { n: g.trail.coords.length, km: g.trail.km, up: g.trail.up, down: g.trail.down, recorded: !!g.trail.recorded, extended: !!g.trail.extended, recKm: g.trail.recKm, extKm: g.trail.extKm } : null }; }); },
+    reachable: reachable,
     links: function () { return links.map(function (l) { return { from: l.from, to: l.to, n: l.coords.length, km: l.km }; }); },
     thinTrack: thinTrack, recordedKm: recordedKm, smoothElevation: smoothElevation,
     tileMode: function () { return TILE_MODES[tileMode].name; }, setCustomTiles: function (u) { localStorage.setItem(CUSTOM_TILES_KEY, u); },

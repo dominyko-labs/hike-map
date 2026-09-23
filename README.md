@@ -20,6 +20,11 @@ Live page: `https://dominyko-labs.github.io/hike-map/`
    their GPS data intact (HEIC or JPEG, both fine).
 4. Open the live page in Safari. Tap **Pick photos**, choose **Browse** (the
    Files picker, not Photo Library), open the folder, Select all, Open.
+   Picking straight from the Photo Library also works when iOS keeps the
+   location, but the picker first exports every photo before the page sees
+   any of them, which takes many minutes for a thousand; from Files it is
+   seconds. Each pick adds to what is already on the map, so batches of a
+   couple of hundred are fine.
 5. The map draws itself: one colour per day, stats and a day list below. Tap
    **Copy link** to keep or share it; the link carries all the points.
 
@@ -137,7 +142,13 @@ and that is the slow, silent part.
     before the recording started or after it ended, more than 100 m from
     its ends, the page routes from the recording's end through those photos
     and adds that to the day's track, distance and ascent; the timeline
-    continues along it.
+    continues along it. The day row then shows the recorded and the routed
+    kilometres separately.
+  * **Photos you could not have walked to.** A photo is used as a waypoint
+    only if it was reachable on foot since the previous point (7 km/h plus
+    0.6 km of slack). A stale GPS fix taken indoors, a lift or a car ride
+    would otherwise send the router on a long detour. Ignored photos still
+    show as pins, and the day row says how many were ignored.
 * **Download GPX** saves one track per day, on the routed trail with
   elevation where available, plus a waypoint per photo.
 * **Huts.** **Huts from OSM** fetches every `tourism=alpine_hut` and

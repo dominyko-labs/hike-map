@@ -372,6 +372,12 @@ const eg1 = await page.evaluate(e => window.__hike.elevationGain(e.map(x => [0, 
 check(eg1.up === 57 && eg1.down === 27, `recordings use a 1 m threshold: up ${eg1.up} down ${eg1.down}`);
 const dw = await page.evaluate(() => window.__hike.dayWaypoints([{ lat: 46.5, lon: 12 }, { lat: 46.50005, lon: 12 }, { lat: 46.51, lon: 12 }]).length);
 check(dw === 2, `waypoints within 40 m collapse (got ${dw})`);
+// a photo 20 km away ten minutes later cannot have been walked to: it is not a waypoint; an hour later a 5 km hop is
+const dw2 = await page.evaluate(() => window.__hike.dayWaypoints([
+  { lat: 46.5, lon: 12, t: 0 }, { lat: 46.68, lon: 12, t: 600000 }, { lat: 46.545, lon: 12, t: 3600000 }, { lat: 46.55, lon: 12, t: 3660000 }]).map(p => p.lat));
+check(dw2.join(',') === '46.5,46.545,46.55', `unreachable photo dropped, the rest kept (${dw2.join(',')})`);
+check((await page.evaluate(() => window.__hike.reachable({ lat: 46.5, lon: 12, t: 0 }, { lat: 46.5, lon: 12.08, t: 3600000 }))) === true, 'reachable: 6 km in an hour');
+check((await page.evaluate(() => window.__hike.reachable({ lat: 46.5, lon: 12, t: 0 }, { lat: 46.5, lon: 12.12, t: 3600000 }))) === false, 'not reachable: 9 km in an hour');
 const brReqs = [];
 let failMode = 'first-profile';        // first request: hiking-mountain fails, trekking succeeds
 await page.route('**/brouter?*', async r => {
@@ -657,8 +663,9 @@ await page.route('**/brouter?*', async r => {
   const coords = ELE.map((e, i) => [lon0 + (lon1 - lon0) * i / 7, lat0 + (lat1 - lat0) * i / 7, e]);
   await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } }] }) });
 });
-// day 1 photos at 08:00 and 09:00Z lie inside the recording (08:00–09:39Z); a photo at 12:00Z, 1.7 km past its end, does not
-await page.goto(base + hash.replace('&s=2', ';46.565,12.015,2026-09-20T12:00:00Z&s=2')); await page.reload(); await ready();
+// day 1 photos at 08:00 and 09:00Z lie inside the recording (08:00–09:39Z); a photo at 12:00Z, 1.7 km past its end, does not.
+// A photo at 10:00Z 30 km away (a stale fix) could not have been walked to and must be ignored.
+await page.goto(base + hash.replace('&s=2', ';46.565,12.015,2026-09-20T12:00:00Z;46.85,12.30,2026-09-20T10:00:00Z&s=2')); await page.reload(); await ready();
 await page.waitForFunction(() => document.getElementById('msg2').textContent.includes('days on trails'));
 const rec4 = path.join(root, 'test', 'fixture-strava2.gpx');
 fs.writeFileSync(rec4, recordedGpx([{ date: '2026-09-20', n: 200, from: [46.52, 12.00], to: [46.55, 12.01], ele: () => 1500 }]));
@@ -668,7 +675,8 @@ await page.waitForFunction(() => document.getElementById('msg').textContent.incl
 await page.waitForFunction(() => { const d = window.__hike.days()[0]; return d.trail && d.trail.extended; }, null, { timeout: 20000 });
 await page.waitForFunction(() => /days on trails/.test(document.getElementById('msg2').textContent) && !/Routing/.test(document.getElementById('msg2').textContent));
 const xd = await page.evaluate(() => window.__hike.days());
-check(xd[0].wpsAfter === 2 && xd[0].trail.recorded && xd[0].trail.extended && xd[0].trail.n === 207, `day 1: recording + 7 routed vertices to the late photo (n=${xd[0].trail.n}, wpsAfter=${xd[0].wpsAfter}, extended=${xd[0].trail.extended})`);
+check(xd[0].wpsAfter === 2 && xd[0].trail.recorded && xd[0].trail.extended && xd[0].trail.n === 207 && xd[0].ignored === 1, `day 1: recording + 7 routed vertices to the late photo, the stale fix ignored (n=${xd[0].trail.n}, wpsAfter=${xd[0].wpsAfter}, ignored=${xd[0].ignored})`);
+check(near(xd[0].trail.recKm, pathKm([[46.52, 12.00], [46.55, 12.01]]), 0.05) && xd[0].trail.extKm > 1 && (await page.locator('#days li').nth(0).innerText()).includes('recorded + ') && (await page.locator('#days li').nth(0).innerText()).includes('1 photo too far to walk, ignored'), `day row separates recorded and routed km and notes the ignored photo (${(await page.locator('#days li').nth(0).innerText()).replace(/\n/g, ' ')})`);
 const recKm = pathKm([[46.52, 12.00], [46.55, 12.01]]);   // the fixture is a straight recording, so its 3 m-step distance equals the straight distance
 check(near(xd[0].trail.km, recKm + pathKm([[46.55, 12.01], [46.565, 12.015]]), 0.05) && xd[0].trail.up === 50 && xd[0].trail.down === 20, `distance and gain include the extension (${xd[0].trail.km.toFixed(2)} km = ${recKm.toFixed(2)} recorded + routed, up ${xd[0].trail.up}, down ${xd[0].trail.down})`);
 check((await lines('recorded')) === 1 && (await lines('link-line')) === 2, 'one recorded line (extended) and links to the next days');
