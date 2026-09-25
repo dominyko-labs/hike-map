@@ -45,6 +45,12 @@ and that is the slow, silent part.
 
 ## What the page shows
 
+* **Deleting a point.** Tap a photo pin and press **Delete this point** to
+  drop a wrong position (a stale GPS fix indoors, a photo from the car). The
+  point leaves the map, the day's figures and the share link, and the day is
+  routed again. **Undo delete** under the buttons brings deleted points back,
+  newest first, until the page is reloaded; after a reload the deletion stays,
+  because the link no longer carries the point.
 * **Days.** Photos are grouped by the calendar day they were taken. Each day is
   a line in its own colour, listed under the stats with photo count, distance
   and the time between the day's first and last photo. Tap a day to zoom to it.
@@ -311,7 +317,7 @@ failure path), off-route detection, trail routing against a mocked BRouter (prof
 fallback, request chunking, elevation gain, caching, failure), the walk
 timeline (time-to-position mapping on straight and routed days, fading,
 play and pause), the elevation profile (axes, day spans, cursor sync,
-scrubbing by pointer), recorded GPX (splitting by day, thinning, elevation from the
+scrubbing by pointer), deleting and restoring points, recorded GPX (splitting by day, thinning, elevation from the
 file, recorded-only days, planned GPX becoming the reference), the 3D view against generated terrain
 and map tiles in software WebGL (decoding, draping, skirt, lines, walker
 height, huts, both fallbacks), huts against a mocked Overpass (bounds query,

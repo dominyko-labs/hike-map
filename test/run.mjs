@@ -650,7 +650,8 @@ await page.evaluate(() => window.__hike.panMap(300, 200));      // a synthetic m
 const c1 = await page.evaluate(() => window.__hike.mapCenter());
 check(Math.abs(c1.lat - c0.lat) > 1e-3 || Math.abs(c1.lon - c0.lon) > 1e-3, `map dragged away (${c1.lat.toFixed(3)}, ${c1.lon.toFixed(3)})`);
 await page.click('#btn-center');
-await page.waitForTimeout(400);
+// the refit is animated: wait until the centre stops moving instead of sampling at a fixed delay
+await page.waitForFunction(c0 => { const c = window.__hike.mapCenter(); return Math.abs(c.lat - c0.lat) < 2e-3 && Math.abs(c.lon - c0.lon) < 2e-3; }, c0, { timeout: 5000 }).catch(() => {});
 const c2 = await page.evaluate(() => window.__hike.mapCenter());
 check(Math.abs(c2.lat - c0.lat) < 2e-3 && Math.abs(c2.lon - c0.lon) < 2e-3, `Centre refits the trip (${c2.lat.toFixed(3)}, ${c2.lon.toFixed(3)} vs ${c0.lat.toFixed(3)}, ${c0.lon.toFixed(3)})`);
 
@@ -728,6 +729,46 @@ await page.evaluate(() => localStorage.removeItem('hike-map.trails.v1'));
 await page.reload(); await ready();
 await page.waitForFunction(() => /days on trails/.test(document.getElementById('msg2').textContent));
 check(await page.locator('#profile').isHidden(), 'no elevation anywhere: profile hidden');
+
+// ---- 17. deleting a photo point ----
+console.log('17. delete and undo a point');
+await page.goto(base + hash); await page.reload(); await ready();
+await page.waitForFunction(() => /days on trails/.test(document.getElementById('msg2').textContent));
+check((await page.evaluate(() => window.__hike.points().length)) === 5, 'five points to start');
+// open the popup of the day-1 second photo (46.55, 12.01) and press Delete. Leaflet fades a closing popup
+// out over 200 ms, so two can coexist briefly: read the newest one, then wait for the old one to go.
+const pins = page.locator('path.leaflet-interactive:not(.day-line):not(.link-line)');
+const pinCount = await pins.count();
+let target = -1;
+for (let i = 0; i < pinCount; i++) {
+  await pins.nth(i).dispatchEvent('click');
+  const txt = await page.evaluate(() => { const all = document.querySelectorAll('.leaflet-popup-content'); return all.length ? all[all.length - 1].innerText : ''; });
+  if (txt.includes('46.55000, 12.01000')) { target = i; break; }
+}
+check(target >= 0, 'popup found for the point at 46.55, 12.01');
+await page.waitForFunction(() => document.querySelectorAll('.leaflet-popup').length === 1);
+check(await page.locator('.leaflet-popup-content button.del').isVisible(), 'popup offers Delete');
+await page.locator('.leaflet-popup-content button.del').click();
+const afterDel = await page.evaluate(() => window.__hike.points().map(p => p.lat));
+check(afterDel.length === 4 && !afterDel.includes(46.55), `point removed (${afterDel})`);
+check(await page.waitForFunction(() => document.querySelectorAll('.leaflet-popup').length === 0, null, { timeout: 2000 }).then(() => true, () => false), 'popup closed (after its fade)');
+check(!page.url().includes('46.55,12.01') && page.url().includes('#p=46.52,12,'), 'share link no longer carries it');
+check((await page.locator('#msg').innerText()).startsWith('Point deleted') && await page.locator('#btn-undo').isVisible(), 'message and Undo shown');
+const d1 = await page.evaluate(() => window.__hike.days()[0]);
+check(d1.n === 1, `day 1 now has one photo (${d1.n})`);
+// delete a second point, then undo twice
+await page.evaluate(() => { const p = window.__hike.points().find(x => x.lat === 46.62); window.__hike.deletePoint(p); });
+check((await page.locator('#btn-undo').innerText()) === 'Undo delete (2)', 'undo counts two deletions');
+await page.click('#btn-undo');
+check((await page.evaluate(() => window.__hike.points().length)) === 4 && (await page.locator('#btn-undo').innerText()) === 'Undo delete', 'first undo restores the latest');
+await page.click('#btn-undo');
+const restored = await page.evaluate(() => window.__hike.points().map(p => p.lat).join(','));
+check(restored === '46.52,46.55,46.58,46.6,46.62' && await page.locator('#btn-undo').isHidden(), `second undo restores the first, in time order (${restored})`);
+check(page.url().includes('46.55,12.01'), 'share link carries it again');
+// deletion survives a reload through the link
+await page.evaluate(() => { const p = window.__hike.points().find(x => x.lat === 46.58); window.__hike.deletePoint(p); });
+await page.reload(); await ready();
+check((await page.evaluate(() => window.__hike.points().map(p => p.lat).join(','))) === '46.52,46.55,46.6,46.62', 'a deleted point stays deleted after reload');
 
 // ---- 9. tiles toggle and layout ----
 console.log('9. tiles and layout');

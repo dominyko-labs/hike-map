@@ -88,6 +88,8 @@
   .hidden { display: none !important; }
   .leaflet-container { font: inherit; }
   .leaflet-popup-content { margin: 10px 12px; font-size: 14px; }
+  .leaflet-popup-content button.del { display: block; margin-top: 8px; width: 100%; padding: 7px 10px; font-size: 14px; border-radius: 8px; border: 1px solid var(--danger); color: var(--danger); background: transparent; cursor: pointer; }
+  #btn-undo { margin-top: 6px; }
   .off-route { stroke: var(--end); stroke-width: 3; }
   .hut { background: none; border: 0; }
   .hut .pin { display: inline-block; width: 18px; height: 18px; border-radius: 4px 4px 4px 0; background: #8b4513; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.4); transform: rotate(-45deg); }
@@ -152,6 +154,7 @@
     <div id="plabel"></div>
   </div>
   <p id="msg" role="status" aria-live="polite"></p>
+  <button id="btn-undo" class="hidden" type="button">Undo delete</button>
   <p id="msg2" role="status" aria-live="polite"></p>
 </section>
 
@@ -205,6 +208,7 @@
   var trails = {};      // waypoint-hash -> {coords: [[lat, lon, ele], ...], km, up, down}
   var recorded = {};    // day key -> {coords: [[lat, lon, ele, t], ...], km, up, down, name}
   var huts = [];        // [{lat, lon, name, ele}] near the walk
+  var deleted = [];     // stack of photo points removed by the user, for undo
   var hutLayer;
   var routing = false;
   var progressLayer, dayLines = [], markerRefs = [], tlDays = [], tlTotal = 0, playing = false, playHandle = null;
@@ -811,9 +815,15 @@
           radius: 6, color: '#fff', weight: 2, fillColor: fill, fillOpacity: 1, className: isOff ? 'off-route' : ''
         });
         markerRefs.push({ m: marker, t: p.t, day: gi });
-        marker.bindPopup('<b>Photo ' + k + ' of ' + sorted.length + '</b> · day ' + (gi + 1) + '<br>' + fmtTime(p.t) +
+        var pop = document.createElement('div');
+        pop.innerHTML = '<b>Photo ' + k + ' of ' + sorted.length + '</b> · day ' + (gi + 1) + '<br>' + fmtTime(p.t) +
           (isFinite(dist) ? '<br>' + (dist < 1000 ? Math.round(dist) + ' m' : (dist / 1000).toFixed(1) + ' km') + ' from route' : '') +
-          '<br><small>' + p.lat.toFixed(5) + ', ' + p.lon.toFixed(5) + '</small>').addTo(layer);
+          '<br><small>' + p.lat.toFixed(5) + ', ' + p.lon.toFixed(5) + '</small>';
+        var del = document.createElement('button');
+        del.type = 'button'; del.className = 'del'; del.textContent = 'Delete this point';
+        del.addEventListener('click', (function (pt) { return function (ev) { ev.stopPropagation(); deletePoint(pt); }; })(p));
+        pop.appendChild(del);
+        marker.bindPopup(pop).addTo(layer);
       });
     });
     links.forEach(function (l) {
@@ -1514,10 +1524,43 @@
     setTimeout(routeAllDays, 600);
   }
 
+  // ---------- deleting a photo point (a wrong GPS fix, a photo from the car) ----------
+  function syncLink() {
+    if (points.length) history.replaceState(null, '', shareLink());
+    else history.replaceState(null, '', location.pathname);
+  }
+  function deletePoint(p) {
+    var i = points.indexOf(p);
+    if (i < 0) return;
+    points.splice(i, 1);
+    deleted.push(p);
+    map.closePopup();
+    syncLink();
+    render();
+    setMsg('Point deleted (' + fmtTime(p.t) + '). ' + points.length + ' left.');
+    updateUndo();
+    scheduleAutoRoute();          // the day's waypoints changed: route it again
+  }
+  function undoDelete() {
+    var p = deleted.pop();
+    if (!p) return;
+    points.push(p);
+    syncLink();
+    render();
+    setMsg('Point restored (' + fmtTime(p.t) + ').');
+    updateUndo();
+    scheduleAutoRoute();
+  }
+  function updateUndo() {
+    var b = $('btn-undo');
+    b.classList.toggle('hidden', !deleted.length);
+    b.textContent = deleted.length > 1 ? 'Undo delete (' + deleted.length + ')' : 'Undo delete';
+  }
+
   // ---------- photo input ----------
   function loadFromHash() {
     var params = parseHash(location.hash);
-    points = []; skipped = 0; name = '';
+    points = []; skipped = 0; name = ''; deleted = []; updateUndo();
     setMsg(''); setMsg2('');
     if (params) {
       var r = parsePointList(params.p || '');
@@ -1609,12 +1652,13 @@
   $('btn-3d').addEventListener('click', function () { if (view3d) exit3d(); else enter3d(); });
   $('btn-center').addEventListener('click', centerView);
   $('btn-huts').addEventListener('click', fetchHuts);
+  $('btn-undo').addEventListener('click', undoDelete);
 
   // Exposed for the test-suite only.
   window.__hike = {
     points: function () { return sortByTime(points); },
     days: function () { return dayGroups.map(function (g) { return { key: g.key, n: g.pts.length, km: g.km, dur: g.dur, color: g.color, wps: g.wps.length, wpsAfter: g.wpsAfter.length, wpsBefore: g.wpsBefore.length, ignored: g.ignored || 0, trail: g.trail ? { n: g.trail.coords.length, km: g.trail.km, up: g.trail.up, down: g.trail.down, recorded: !!g.trail.recorded, extended: !!g.trail.extended, recKm: g.trail.recKm, extKm: g.trail.extKm } : null }; }); },
-    reachable: reachable,
+    reachable: reachable, deletePoint: deletePoint,
     links: function () { return links.map(function (l) { return { from: l.from, to: l.to, n: l.coords.length, km: l.km }; }); },
     thinTrack: thinTrack, recordedKm: recordedKm, smoothElevation: smoothElevation,
     tileMode: function () { return TILE_MODES[tileMode].name; }, setCustomTiles: function (u) { localStorage.setItem(CUSTOM_TILES_KEY, u); },
